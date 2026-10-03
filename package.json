@@ -7,8 +7,11 @@
     "build": "next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node --import ./tests/resolve-ts.mjs --test tests/core.test.ts",
-    "check": "npm run typecheck && npm test && npm run build"
+    "test": "node --import ./tests/resolve-ts.mjs --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "test:one": "node --import ./tests/resolve-ts.mjs --test",
+    "banks": "python3 -m ml.scripts.gen_banks_ts",
+    "e2e": "node tests/e2e-devmode.mjs"
   },
   "dependencies": {
     "next": "^16.3.8",
@@ -19,6 +22,7 @@
     "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "playwright": "^1.63.0",
     "typescript": "^5.9.3"
   },
   "engines": {

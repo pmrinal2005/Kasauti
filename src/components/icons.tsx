@@ -28,3 +28,4 @@ export const ICheck = mk(<path d="M5 12l5 5L20 7" />);
 export const IDownload = mk(<><path d="M12 3v12M7 10l5 5 5-5" /><path d="M4 21h16" /></>);
 export const ISpark = mk(<path d="M12 3l1.8 5.4L19 10l-5.2 1.6L12 17l-1.8-5.4L5 10l5.2-1.6L12 3z" />);
 export const IChart = mk(<><path d="M3 3v18h18" /><path d="M7 15l4-4 3 3 5-6" /></>);
+export const IEye = mk(<><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>);

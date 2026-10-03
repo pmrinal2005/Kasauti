@@ -1,52 +1,84 @@
 /// <reference lib="webworker" />
 /**
- * Tier-1 inference Worker — hosts onnxruntime-web. Never loaded on first paint;
- * instantiated only when the user opens a tool that needs Tier-1.
+ * Tier-1 inference Worker — the only place in Kasauti that runs Laya.
  *
- * Model delivery: a PUBLIC Hugging Face *model* repo (static LFS bytes over the HF
- * CDN — no Space, no compute). Expected layout (produced by ml/export):
- *   <base>/manifest.json            { modelVersion, files:{wasm,webgpu,tokenizer}, maxLen, headMaxLen, temperatures, abstain }
- *   <base>/<files.wasm>             per-channel INT8 graph   (WASM EP)
- *   <base>/<files.webgpu>           4-bit MatMulNBits graph  (WebGPU EP)
- * Graph I/O mirrors DecisionModel.forward: input_ids, attention_mask, marker_pos,
- * marker_mask, qtype → logits [B, K].
+ * Delivery: a PUBLIC Hugging Face *model* repo, static LFS bytes over the HF CDN. No Space, no
+ * GPU, no Kasauti-operated compute, no `LAYA_URL`, no `/v1/systemone`. The published layout (all
+ * of it produced by `ml/kasauti_ml/pipeline.py`) is:
  *
- * The Cache API (not IndexedDB) stores the binaries, keyed by content-hashed filename.
- * Also runs the Week-0 device micro-benchmark (GEMM throughput at hidden=768).
+ *   <base>/manifest.json                 schema 2 — calibration, thresholds, hashes, evals
+ *   <base>/<files.webgpu.path>           4-bit MatMulNBits graph   (WebGPU EP, preferred)
+ *   <base>/<files.wasm.path>             dynamic INT8 graph        (WASM EP, fallback)
+ *   <base>/<files.fp32.path>             fp32 reference graph      (debug / parity only)
+ *   <base>/<tokenizer.path>              vocabulary-pruned tokenizer.json
+ *   <base>/<parity.path>                 parity vectors (tokenizer ids + logits)
+ *
+ * Graph I/O mirrors the reference `DecisionModel.forward`:
+ *   input_ids [B,L] i64 · attention_mask [B,L] i64 · marker_pos [B,K] i64 ·
+ *   marker_mask [B,K] bool · qtype [B] i64  →  logits [B,K] f32 (+ act_logits, never gated on)
+ *
+ * Rules this worker enforces so a wrong answer is impossible to *ship* without noticing:
+ *   * every downloaded artifact is sha256-verified against the manifest (and again on cache hit)
+ *   * the tokenizer's own special ids must match the manifest's, or we refuse to run
+ *   * the banks sha256 must match the generated `src/lib/banks.ts`, or we warn loudly: that
+ *     mismatch means the model was trained on different question wording than the runtime asks
+ *   * an uncalibrated manifest can never trigger an action — thresholds are forced to abstain
+ *     (issue #185: `act_probability` carries no signal, so `confidence` is the only gate)
  */
 import {
   buildSequence,
-  decode,
-  DEFAULT_MANIFEST,
-  optionKeys,
-  patchTokenizerJSON,
-  CLAIM_V1_TRIAGE,
+  decodeBatch,
+  parseManifest,
+  QTYPES,
   type CalibrationManifest,
   type QuestionSet,
-  type Tokenizer,
 } from "../core/laya-client-browser";
+import { createTokenizer, parseTokenizerJson, type LayaTokenizer } from "../core/tokenizer";
+import { BANKS, BANKS_SHA256, BANKS_VERSION } from "../lib/banks";
 
 declare const self: DedicatedWorkerGlobalScope;
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const dynImport = new Function("u", "return import(u)") as (u: string) => Promise<any>;
-const ORT_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
-const TOK_CDN = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.2/dist/transformers.min.js";
-/** Tokenizer ships in the ORIGINAL Laya repo; only the ONNX graphs live in Kasauti's export repo. */
-const TOK_BASE = "https://huggingface.co/convaiinnovations/laya/resolve/main/multilingual/tokenizer";
-const CACHE = "kasauti-model-v1";
 
+/** Pinned, overridable at build time. Kept off the main bundle: the Worker chunk loads it lazily. */
+const ORT_BASE = process.env.NEXT_PUBLIC_ORT_BASE || "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.0/dist/";
+const CACHE = "kasauti-model-v2";
+
+let ortMod: any = null;
 let session: any = null;
-let tok: Tokenizer | null = null;
-let manifest: CalibrationManifest = DEFAULT_MANIFEST;
+let tok: LayaTokenizer | null = null;
+let manifest: CalibrationManifest = parseManifest(null);
 let backendUsed = "none";
+let banksMismatch: string | null = null;
 
 const post = (m: unknown) => self.postMessage(m);
 
-async function cachedFetch(url: string, onProgress?: (loaded: number, total: number) => void): Promise<ArrayBuffer> {
+async function sha256Hex(buf: ArrayBuffer): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Download once into the Cache API (not IndexedDB: these are large binaries, and the Cache API
+ * streams and evicts them the way a browser cache should), then re-verify the content hash on
+ * every load — a corrupted or stale cache entry must fail loudly, not quietly shift logits.
+ */
+async function cachedFetchBytes(
+  url: string,
+  opts: { sha256?: string; onProgress?: (loaded: number, total: number) => void; label?: string } = {},
+): Promise<ArrayBuffer> {
   const cache = await caches.open(CACHE);
   const hit = await cache.match(url);
-  if (hit) return hit.arrayBuffer();
+  if (hit) {
+    const buf = await hit.arrayBuffer();
+    if (!opts.sha256 || (await sha256Hex(buf)) === opts.sha256) {
+      opts.onProgress?.(buf.byteLength, buf.byteLength);
+      return buf;
+    }
+    await cache.delete(url); // sha mismatch → poisoned entry, drop it and re-download
+    post({ type: "status", status: "downloading", detail: `Cached ${opts.label ?? "artifact"} failed its hash check — refetching` });
+  }
   const res = await fetch(url);
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${url}`);
   const total = Number(res.headers.get("content-length") || 0);
@@ -58,116 +90,195 @@ async function cachedFetch(url: string, onProgress?: (loaded: number, total: num
     if (done) break;
     chunks.push(value);
     loaded += value.byteLength;
-    onProgress?.(loaded, total);
+    opts.onProgress?.(loaded, total);
   }
   const buf = new Uint8Array(loaded);
   let o = 0;
-  for (const c of chunks) { buf.set(c, o); o += c.byteLength; }
+  for (const c of chunks) {
+    buf.set(c, o);
+    o += c.byteLength;
+  }
+  if (opts.sha256) {
+    const got = await sha256Hex(buf.buffer);
+    if (got !== opts.sha256) throw new Error(`${opts.label ?? url} hash mismatch: ${got.slice(0, 12)} ≠ ${opts.sha256.slice(0, 12)}`);
+  }
   await cache.put(url, new Response(buf, { headers: { "content-type": "application/octet-stream" } }));
   return buf.buffer;
 }
 
 async function load(base: string, backend: string, threads: number) {
-  post({ type: "status", status: "probing", detail: `Looking for manifest at ${base}/manifest.json` });
+  post({ type: "status", status: "probing", detail: `Looking for a published manifest at ${base}/manifest.json` });
   const mres = await fetch(`${base}/manifest.json`, { cache: "no-cache" }).catch(() => null);
   if (!mres || !mres.ok) {
-    post({ type: "status", status: "unpublished", detail: "Quantized ONNX export not published yet — Tier-0 remains active (circuit breaker)." });
+    post({
+      type: "status",
+      status: "unpublished",
+      detail: "No calibrated export published at this address yet — Tier-0 stays active (circuit breaker, honest copy).",
+    });
     return;
   }
-  const m = await mres.json();
-  manifest = { ...DEFAULT_MANIFEST, ...m };
-  const useGpu = backend === "webgpu" && m.files?.webgpu;
-  const file = useGpu ? m.files.webgpu : m.files.wasm;
-  const ort = await dynImport(ORT_CDN + (useGpu ? "ort.webgpu.min.mjs" : "ort.wasm.min.mjs"));
-  ort.env.wasm.wasmPaths = ORT_CDN;
-  ort.env.wasm.numThreads = threads;
-  const bytes = await cachedFetch(`${base}/${file}`, (l, t) => post({ type: "progress", loaded: l, total: t }));
+  manifest = parseManifest(await mres.json());
+
+  if (!manifest.calibrated) {
+    // Schema 1 / empty calibration, or an export that declared itself report-only: report answers,
+    // never act on them. The published card measured ECE 0.31 for the multilingual base, so an
+    // uncalibrated confidence is decoration.
+    manifest.abstain = { default: 1 };
+  }
+  if (manifest.banksSha256 && manifest.banksSha256 !== BANKS_SHA256) {
+    banksMismatch = `trained on banks ${manifest.banksSha256.slice(0, 12)}, runtime asks ${BANKS_SHA256.slice(0, 12)} (v${BANKS_VERSION})`;
+    post({ type: "status", status: "probing", detail: `Question-bank drift: ${banksMismatch}` });
+  }
+
+  const files = manifest.files ?? {};
+  const want: "webgpu" | "wasm" = backend === "webgpu" && files.webgpu ? "webgpu" : "wasm";
+  const spec = files[want];
+  if (!spec) throw new Error(`manifest lists no ${want} graph`);
+
+  // ---------------------------------------------------------------- tokenizer
+  post({ type: "status", status: "downloading", detail: "Fetching the vocabulary-pruned tokenizer (one-time, cached)…" });
+  const tjBytes = await cachedFetchBytes(`${base}/${manifest.tokenizerPath}`, {
+    sha256: manifest.tokenizerSha256,
+    label: "tokenizer.json",
+    onProgress: (l, t) => post({ type: "progress", loaded: l, total: t, what: "tokenizer" }),
+  });
+  const data = parseTokenizerJson(JSON.parse(new TextDecoder().decode(tjBytes)));
+  if (!data) throw new Error("tokenizer.json could not be parsed");
+  tok = createTokenizer(data);
+  const declared = manifest.tokenizerSpecials;
+  if (declared) {
+    const bad = Object.entries(declared).filter(([k, v]) => (data.ids as unknown as Record<string, number>)[k] !== v);
+    if (bad.length) {
+      throw new Error(
+        `tokenizer/model mismatch: manifest declares ${JSON.stringify(declared)} but the tokenizer resolves ` +
+          `${JSON.stringify(data.ids)} — refusing to run`,
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------- graph
+  const ort = await dynImport(ORT_BASE + (want === "webgpu" ? "ort.webgpu.min.mjs" : "ort.wasm.min.mjs"));
+  ortMod = ort;
+  ort.env.wasm.wasmPaths = ORT_BASE;
+  ort.env.wasm.numThreads = Math.max(1, threads);
+  // Single-threaded unless the page is cross-origin isolated: SharedArrayBuffer is unavailable
+  // otherwise and ORT would fail at session creation instead of degrading.
+  ort.env.wasm.simd = true;
+  const bytes = await cachedFetchBytes(`${base}/${spec.path}`, {
+    sha256: spec.sha256,
+    label: spec.path,
+    onProgress: (l, t) => post({ type: "progress", loaded: l, total: t, what: want }),
+  });
+  post({ type: "status", status: "downloading", detail: "Starting the ONNX session…" });
   session = await ort.InferenceSession.create(new Uint8Array(bytes), {
-    executionProviders: useGpu ? ["webgpu", "wasm"] : ["wasm"],
+    executionProviders: want === "webgpu" ? ["webgpu", "wasm"] : ["wasm"],
     graphOptimizationLevel: "all",
   });
-  tok = await loadTokenizer(m.tokenizerBase ?? TOK_BASE);
-  backendUsed = useGpu ? "webgpu" : threads > 1 ? "wasm-mt" : "wasm-st";
-  (self as any).__ort = ort;
-  post({ type: "status", status: "ready", detail: `${manifest.modelVersion} on ${backendUsed}`, backend: backendUsed });
+  backendUsed = want === "webgpu" ? "webgpu" : ort.env.wasm.numThreads > 1 ? "wasm-mt" : "wasm-st";
+
+  post({
+    type: "manifest",
+    manifest,
+    backend: backendUsed,
+    banksMismatch,
+    banksVersion: BANKS_VERSION,
+    tokenizer: { vocabSize: tok.vocabSize, kind: tok.kind, specials: data.ids, bytes: tjBytes.byteLength },
+    graph: { path: spec.path, bytes: spec.bytes, sha256: spec.sha256 },
+  });
+  post({
+    type: "status",
+    status: "ready",
+    backend: backendUsed,
+    detail:
+      `${manifest.modelVersion} · ${backendUsed}${manifest.calibrated ? "" : manifest.reportOnly ? " · report-only (did not clear the eval gates — inspect it, never act on it)" : " · uncalibrated (report-only)"}` +
+      (banksMismatch ? ` · bank drift (${banksMismatch})` : ""),
+  });
 }
 
-/**
- * Build the tokenizer from tokenizer.json + tokenizer_config.json directly (Cache API, ~34 MB once).
- * - AutoTokenizer.from_pretrained({subfolder}) looks for the config at the repo ROOT and 404s here.
- * - transformers.js exposes no cls_token_id; Laya's CLS is <bos> (2), SEP is <eos> (1), MASK is <mask> (4),
- *   so ids are resolved from the config's token strings, never from guessed fallbacks.
- * - patchTokenizerJSON() restores Rust-tokenizers parity for Metaspace prepend_scheme="always".
- */
-async function loadTokenizer(base: string): Promise<Tokenizer> {
-  post({ type: "status", status: "downloading", detail: "Fetching Laya tokenizer (one-time, cached)…" });
-  const dec = new TextDecoder();
-  const [tjBuf, tcBuf] = await Promise.all([
-    cachedFetch(`${base}/tokenizer.json`, (l, t) => post({ type: "progress", loaded: l, total: t })),
-    cachedFetch(`${base}/tokenizer_config.json`),
-  ]);
-  const tj = patchTokenizerJSON(JSON.parse(dec.decode(tjBuf)));
-  const tc = JSON.parse(dec.decode(tcBuf));
-  const tf = await dynImport(TOK_CDN);
-  const hf = new tf.PreTrainedTokenizer(tj, tc);
-  const id = (t: string | undefined, fb: number) => (t && hf.model.tokens_to_ids.get(t)) ?? fb;
-  const t: Tokenizer = {
-    encode: (x: string) => hf.encode(x, { add_special_tokens: false }),
-    cls: id(tc.cls_token ?? tc.bos_token, 2),
-    sep: id(tc.sep_token ?? tc.eos_token, 1),
-    mask: id(tc.mask_token, 4),
-    pad: id(tc.pad_token, 0),
-    maskToken: tc.mask_token,
-  };
-  return t;
-}
-
-/** Tokenizer-only inspection: shows the exact Laya input for a message before any ONNX graph exists. */
-async function inspect(state: string) {
-  if (!tok) tok = await loadTokenizer(TOK_BASE);
+/** Tokenizer-only inspection: shows the exact Laya input for a message before any graph exists. */
+async function inspect(state: string, base: string, questions: QuestionSet) {
+  if (!tok) {
+    const tjBytes = await cachedFetchBytes(`${base}/${manifest.tokenizerPath || "tokenizer.json"}`, { label: "tokenizer.json" });
+    const data = parseTokenizerJson(JSON.parse(new TextDecoder().decode(tjBytes)));
+    if (!data) throw new Error("tokenizer.json could not be parsed");
+    tok = createTokenizer(data);
+  }
   const t0 = performance.now();
-  const s = buildSequence(tok, state, CLAIM_V1_TRIAGE, manifest.maxLen, manifest.headMaxLen);
-  return { type: "inspect", ids: s.ids.length, markers: s.markers, head: s.ids.slice(0, 40), special: { cls: tok.cls, sep: tok.sep, mask: tok.mask }, ms: performance.now() - t0 };
+  // no question supplied → use the bank's triage, so "Inspect" always builds a real sequence
+  const first = Object.values(questions)[0] ?? BANKS.claim_v1.triage;
+  const s = first ? buildSequence(tok, state, first, manifest.maxLen, manifest.headMaxLen) : { ids: [], markers: [] };
+  const opts = first ? Object.keys((first.criteria ?? {}) as Record<string, unknown>) : [];
+  post({
+    type: "inspect",
+    ids: s.ids.length,
+    markers: s.markers,
+    head: s.ids.slice(0, 40),
+    special: { cls: tok.cls, sep: tok.sep, mask: tok.mask, pad: tok.pad, unk: tok.unk },
+    vocabSize: tok.vocabSize,
+    kind: tok.kind,
+    options: opts.length,
+    ms: performance.now() - t0,
+  });
 }
-
-const QT: Record<string, number> = { choice: 0, score: 1, noul: 2 };
 
 async function predict(state: string, qs: QuestionSet) {
   if (!session || !tok) throw new Error("model not loaded");
-  const ort = (self as any).__ort;
+  const ort = ortMod;
   const t0 = performance.now();
   const names = Object.keys(qs);
   const seqs = names.map((n) => buildSequence(tok!, state, qs[n], manifest.maxLen, manifest.headMaxLen));
   const L = Math.max(...seqs.map((s) => s.ids.length));
   const K = Math.max(...seqs.map((s) => s.markers.length));
   const B = names.length;
-  const ids = new BigInt64Array(B * L), att = new BigInt64Array(B * L);
-  const mpos = new BigInt64Array(B * K), mmask = new Uint8Array(B * K), qt = new BigInt64Array(B);
+  const ids = new BigInt64Array(B * L);
+  const att = new BigInt64Array(B * L);
+  const mpos = new BigInt64Array(B * K);
+  const mmask = new Uint8Array(B * K);
+  const qt = new BigInt64Array(B);
   seqs.forEach((s, b) => {
-    s.ids.forEach((v, i) => { ids[b * L + i] = BigInt(v); att[b * L + i] = 1n; });
-    s.markers.forEach((p, k) => { mpos[b * K + k] = BigInt(p); mmask[b * K + k] = 1; });
-    qt[b] = BigInt(QT[qs[names[b]].type]);
+    s.ids.forEach((v, i) => {
+      ids[b * L + i] = BigInt(v);
+      att[b * L + i] = 1n;
+    });
+    s.markers.forEach((p, k) => {
+      mpos[b * K + k] = BigInt(p);
+      mmask[b * K + k] = 1;
+    });
+    qt[b] = BigInt(QTYPES[qs[names[b]].type] ?? 0);
   });
-  const out = await session.run({
+  const feeds = {
     input_ids: new ort.Tensor("int64", ids, [B, L]),
     attention_mask: new ort.Tensor("int64", att, [B, L]),
     marker_pos: new ort.Tensor("int64", mpos, [B, K]),
     marker_mask: new ort.Tensor("bool", mmask, [B, K]),
     qtype: new ort.Tensor("int64", qt, [B]),
-  });
-  const logits = out.logits.data as Float32Array;
-  const answers: Record<string, unknown> = {};
-  names.forEach((n, b) => {
-    const k = optionKeys(qs[n]).length;
-    answers[n] = decode(qs[n], logits.subarray(b * K, b * K + k), manifest);
-  });
-  return { answers, ms: performance.now() - t0, modelVersion: manifest.modelVersion, backend: backendUsed };
+  };
+  const out = await session.run(feeds);
+  const raw = out.logits.data as Float32Array;
+  // Keep as a plain array: `decodeBatch` slices it, and an ORT tensor view may be reused.
+  const logits = Array.prototype.slice.call(raw) as number[];
+  const answers = decodeBatch(qs, logits, K, manifest);
+  const asked = Object.keys(answers).length;
+  const abstained = Object.values(answers).filter((a) => a.abstained).length;
+  return {
+    answers,
+    ms: performance.now() - t0,
+    modelVersion: manifest.modelVersion,
+    backend: backendUsed,
+    calibrated: manifest.calibrated,
+    banksMismatch,
+    tokens: { batch: B, seqLen: L, markers: K },
+    abstained: { count: abstained, of: asked },
+  };
 }
 
-/** Week-0 spike: measure sustained FP32 GEMM throughput at the encoder's hidden size. */
+/** Week-0 spike: sustained FP32 GEMM throughput at the mmBERT hidden size, to size the budget. */
 function benchmark() {
-  const H = 768, T = 64; // hidden, tokens per block
-  const a = new Float32Array(T * H), w = new Float32Array(H * H), c = new Float32Array(T * H);
+  const H = 768;
+  const T = 64; // tokens per block
+  const a = new Float32Array(T * H);
+  const w = new Float32Array(H * H);
+  const c = new Float32Array(T * H);
   for (let i = 0; i < a.length; i++) a[i] = Math.random() - 0.5;
   for (let i = 0; i < w.length; i++) w[i] = Math.random() - 0.5;
   const runs: number[] = [];
@@ -176,7 +287,8 @@ function benchmark() {
     for (let i = 0; i < T; i++) {
       const ai = i * H;
       for (let k = 0; k < H; k++) {
-        const av = a[ai + k], wk = k * H;
+        const av = a[ai + k];
+        const wk = k * H;
         for (let j = 0; j < H; j++) c[ai + j] += av * w[wk + j];
       }
     }
@@ -185,9 +297,9 @@ function benchmark() {
   runs.sort((x, y) => x - y);
   const ms = runs[2];
   const gflops = (2 * T * H * H) / (ms / 1000) / 1e9;
-  // mmBERT-base ≈ 2·params FLOPs/token for the encoder (~110M non-embedding params)
+  // mmBERT-base ≈ 2·params FLOPs per token (~110M non-embedding params)
   const flopsPerToken = 2 * 110e6;
-  const projected = (tokens: number) => (flopsPerToken * tokens) / (gflops * 1e9 * 2.5 /* ORT SIMD/INT8 vs scalar JS */) * 1000;
+  const projected = (tokens: number) => ((flopsPerToken * tokens) / (gflops * 1e9 * 2.5) /* ORT SIMD/INT8 vs scalar JS */) * 1000;
   return { gflops, medianMs: ms, projectedMs: { q1: projected(320), q3: projected(3 * 320), q4: projected(4 * 320) } };
 }
 
@@ -197,7 +309,15 @@ self.onmessage = async (ev: MessageEvent<any>) => {
     if (msg.type === "load") await load(msg.base, msg.backend, msg.threads);
     else if (msg.type === "predict") post({ type: "result", id: msg.id, ...(await predict(msg.state, msg.questions)) });
     else if (msg.type === "bench") post({ type: "bench", ...benchmark() });
-    else if (msg.type === "inspect") { post(await inspect(msg.state)); post({ type: "status", status: session ? "ready" : "unpublished", detail: session ? `${manifest.modelVersion} on ${backendUsed}` : "Tokenizer ready · ONNX export not published yet — Tier-0 active", backend: backendUsed }); }
+    else if (msg.type === "inspect") {
+      await inspect(msg.state, msg.base ?? "", msg.questions ?? {});
+      post({
+        type: "status",
+        status: session ? "ready" : "unpublished",
+        detail: session ? `${manifest.modelVersion} on ${backendUsed}` : "Tokenizer ready · no calibrated export published yet — Tier-0 active",
+        backend: backendUsed,
+      });
+    }
   } catch (e) {
     post({ type: "status", status: "error", detail: String(e), id: msg.id });
   }

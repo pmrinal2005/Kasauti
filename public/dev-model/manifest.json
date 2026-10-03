@@ -1,0 +1,160 @@
+{
+  "schema": 2,
+  "modelVersion": "kasauti-laya-tiny-dev@f0a94c10",
+  "maxLen": 192,
+  "headMaxLen": 64,
+  "qtypes": {
+    "choice": 0,
+    "score": 1,
+    "noul": 2
+  },
+  "temperature": [
+    5.0,
+    1.0,
+    1.3224718570709229
+  ],
+  "temperatureByBucket": {
+    "choice:3-5": 5.0,
+    "choice:6-10": 5.0,
+    "noul:2": 1.3224718570709229
+  },
+  "abstain": {
+    "choice:3-5": 1.0,
+    "choice:6-10": 1.0,
+    "default": 1.0,
+    "noul:2": 0.7865
+  },
+  "files": {
+    "wasm": {
+      "path": "kasauti-laya-int8.onnx",
+      "bytes": 578989,
+      "sha256": "f0a94c1017859157c0aba51fe99557bd47bca26576759c3f11e7ebb6b687d4b4"
+    },
+    "webgpu": {
+      "path": "kasauti-laya-q4.onnx",
+      "bytes": 1488446,
+      "sha256": "ffb2bbf3e3a8602b189a6221099dd74a0e8a3096fd80a23a5f4e968c503577b9"
+    },
+    "fp32": {
+      "path": "kasauti-laya-fp32.onnx",
+      "bytes": 1997795,
+      "sha256": "95e86941b9c5b1a69f25856dafc128e87653299a849ca9693ed0a5ab669d1c95"
+    }
+  },
+  "tokenizer": {
+    "path": "tokenizer.json",
+    "bytes": 175523,
+    "sha256": "42ae90038e38a35fea2552f8dabae08dba8afde64f2e62cdccd34356b094ba07",
+    "vocab": 4685,
+    "pruned": true,
+    "specials": {
+      "mask": 4,
+      "cls": 2,
+      "sep": 3,
+      "pad": 0,
+      "unk": 1
+    }
+  },
+  "parity": {
+    "path": "parity.json",
+    "bytes": 6183,
+    "sha256": "c85fbc56b6c5cb2e07349e2104a87ff55903209d57f44723c082455332d08103"
+  },
+  "evals": {
+    "accuracy": 0.4784,
+    "ece": 0.1191,
+    "int8Agreement": 1.0,
+    "q4Agreement": 1.0,
+    "dataset": "kasauti-synthetic-1.0.0"
+  },
+  "profile": "smoke",
+  "createdUtc": "2026-10-03T17:09:48Z",
+  "reportOnly": true,
+  "banks": {
+    "version": "1.0.0",
+    "sha256": "cf02415d58f97f563a999960643dc27c3a1046e7b670bcdd53690d9da9a192ee"
+  },
+  "vocabPruning": {
+    "before": 4744,
+    "after": 4685,
+    "drift": 0
+  },
+  "graphIO": {
+    "int8": {
+      "inputs": [
+        {
+          "name": "input_ids",
+          "dtype": "7"
+        },
+        {
+          "name": "attention_mask",
+          "dtype": "7"
+        },
+        {
+          "name": "marker_pos",
+          "dtype": "7"
+        },
+        {
+          "name": "marker_mask",
+          "dtype": "9"
+        },
+        {
+          "name": "qtype",
+          "dtype": "7"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "dtype": "1"
+        },
+        {
+          "name": "act_logits",
+          "dtype": "1"
+        }
+      ],
+      "opset": [
+        {
+          "domain": "",
+          "version": 18
+        }
+      ],
+      "nodes": 382,
+      "ops": [
+        "Add",
+        "Cast",
+        "Clip",
+        "Concat",
+        "Constant",
+        "ConstantOfShape",
+        "DequantizeLinear",
+        "Div",
+        "DynamicQuantizeLinear",
+        "Equal",
+        "Erf",
+        "Expand",
+        "Gather",
+        "GatherElements",
+        "LayerNormalization",
+        "Log",
+        "MatMul",
+        "MatMulInteger",
+        "Mul",
+        "Neg",
+        "Not",
+        "Range",
+        "ReduceSum",
+        "Reshape",
+        "Shape",
+        "Slice",
+        "Softmax",
+        "Squeeze",
+        "Sub",
+        "TopK",
+        "Transpose",
+        "Unsqueeze",
+        "Where"
+      ]
+    }
+  }
+}

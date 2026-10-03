@@ -1,10 +1,4 @@
-// Test-only loader: lets Node's built-in type stripping resolve extensionless `./x` imports in src/core.
+// Test-only loader registration. See tests/ts-loader.mjs for the resolve/load hooks.
+// Used as `node --import ./tests/resolve-ts.mjs --test tests/*.test.ts`.
 import { register } from "node:module";
-register("data:text/javascript," + encodeURIComponent(`
-export async function resolve(spec, ctx, next) {
-  try { return await next(spec, ctx); }
-  catch (e) {
-    if ((spec.startsWith("./") || spec.startsWith("../")) && !/\\.[cm]?[jt]s$/.test(spec)) return next(spec + ".ts", ctx);
-    throw e;
-  }
-}`));
+register("./ts-loader.mjs", import.meta.url);

@@ -1,0 +1,34 @@
+# Kasauti × Laya — ML pipeline dependencies.
+#
+# Kaggle's image already ships torch + CUDA; the extras below are what the pipeline itself needs.
+# On a laptop the same list works with the CPU wheels (`torch==2.14.1+cpu` etc.).
+#
+#   pip install -r ml/requirements.txt
+#
+# Pins are floors, not exact locks: the pipeline was built against these and the tests in
+# `tests/` are what actually pin behaviour.
+
+# --- the reference Laya implementation (build_sequence / agent / teacher helpers) -------------
+#     `laya[onnx]` is only needed if you want to compare against the reference ONNXAgent.
+laya>=0.3.20
+
+# --- model + tokenizer --------------------------------------------------------------------
+transformers>=4.48
+tokenizers>=0.21,<0.23
+safetensors>=0.4
+huggingface_hub>=0.26
+
+# --- export + quantization ------------------------------------------------------------------
+onnx>=1.17
+onnxruntime>=1.20
+# onnxruntime >= 1.21 moved the 4-bit weight-only quantizer into onnx_ir; the pipeline imports
+# MatMulNBitsQuantizer from onnxruntime.quantization and needs this to resolve.
+onnx_ir>=0.1
+onnxconverter-common>=1.14   # optional: fp16 variant; the pipeline degrades gracefully without it
+
+# --- data + metrics -------------------------------------------------------------------------
+numpy>=1.26
+scikit-learn>=1.5
+
+# --- torch (Kaggle image already has a CUDA build; this is the CPU fallback) -----------------
+# torch>=2.4

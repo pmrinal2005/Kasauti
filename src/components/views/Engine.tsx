@@ -1,12 +1,62 @@
 "use client";
 import { Fragment, useEffect, useState } from "react";
 import { detectCapability, type Capability } from "@/lib/capability";
-import { enableDeepCheck, inspectSequence, MODEL_BASE, runBenchmark, subscribeModel, type BenchResult, type InspectResult, type ModelState } from "@/lib/engine";
+import { CACHE_NAME, enableDeepCheck, inspectSequence, MODEL_BASE, runBenchmark, subscribeModel, type BenchResult, type InspectResult, type ModelState } from "@/lib/engine";
 import { CLAIM_V1_FOLLOWUPS, CLAIM_V1_TRIAGE, DEFAULT_MANIFEST, renderOptions } from "@/core/laya-client-browser";
 import { BarChart } from "../charts";
 import { ICpu, IDownload, IBolt } from "../icons";
 
 const yes = (b: boolean) => <span className={`chip ${b ? "ok" : "neutral"}`}>{b ? "yes" : "no"}</span>;
+
+/**
+ * The published eval block, rendered against the thresholds the pipeline enforces.
+ * Kept deliberately dumb: a number the manifest does not carry is shown as "not published"
+ * rather than defaulted to something flattering.
+ */
+interface EvalGate {
+  key: string;
+  label: string;
+  value: unknown;
+  gate: number | "exact";
+  ok: boolean;
+  valueText: string;
+  gateText: string;
+  note: string;
+  /** true = higher is better, false = lower is better */
+  higher: boolean;
+}
+
+const EVAL_GATES: Array<Omit<EvalGate, "ok" | "valueText" | "gateText" | "value"> & { key: string }> = [
+  { key: "accuracy", label: "Held-out accuracy", gate: 0.8, higher: true, note: "overall, all question types" },
+  { key: "accuracyPerLanguageMin", label: "Worst-language accuracy", gate: 0.7, higher: true, note: "English + Hindi at minimum" },
+  { key: "ece", label: "Calibration error (ECE)", gate: 0.12, higher: false, note: "Laya ships over-confident; this is the fix" },
+  { key: "noulAccuracy", label: "noul accuracy", gate: 0.85, higher: true, note: "follow-up yes/no, label-order augmented" },
+  { key: "choiceAccuracy", label: "choice accuracy", gate: 0.75, higher: true, note: "≤20 options, order-shuffled" },
+  { key: "recallPayToWithdraw", label: "Pay-to-withdraw recall", gate: 0.8, higher: true, note: "the highest-harm script family" },
+  { key: "impersonationRecall", label: "Impersonation recall", gate: 0.85, higher: true, note: "police / CBI / customs threats" },
+  { key: "falsePositiveRate", label: "False-positive rate", gate: 0.1, higher: false, note: "measured on genuine advisories and education" },
+  { key: "abstentionCoverage", label: "Abstention coverage", gate: 0.55, higher: true, note: "share of uncertain cases correctly held back" },
+  { key: "int8Agreement", label: "INT8 ↔ fp32 agreement", gate: 0.95, higher: true, note: "top-1 agreement across option permutations" },
+  { key: "q4Agreement", label: "4-bit ↔ fp32 agreement", gate: 0.8, higher: true, note: "WebGPU path; 0.95 expected with --block-size 64" },
+];
+
+function evalGateRows(evals: Record<string, number | null> | undefined): EvalGate[] {
+  if (!evals) return [];
+  const rows: EvalGate[] = [];
+  for (const g of EVAL_GATES) {
+    const raw = evals[g.key];
+    if (raw === undefined || raw === null) continue;
+    const v = Number(raw);
+    rows.push({
+      ...g,
+      value: v,
+      ok: g.higher ? v >= (g.gate as number) : v <= (g.gate as number),
+      valueText: v.toFixed(3),
+      gateText: (g.higher ? "≥ " : "≤ ") + (g.gate as number).toFixed(2),
+    });
+  }
+  return rows;
+}
 
 export function Engine() {
   const [cap, setCap] = useState<Capability | null>(null);
@@ -16,6 +66,9 @@ export function Engine() {
   const [cacheMB, setCacheMB] = useState<number | null>(null);
   const [probe, setProbe] = useState("Guaranteed 3% daily profit, join VIP group today");
   const [insp, setInsp] = useState<InspectResult | null>(null);
+  // once an export is loaded, everything shown must describe THAT export, not the build-time default
+  const man = model?.manifest ?? DEFAULT_MANIFEST;
+  const evalRows = evalGateRows(man.evals);
   const [inspBusy, setInspBusy] = useState(false);
 
   useEffect(() => { setCap(detectCapability()); return subscribeModel(setModel); }, []);
@@ -31,7 +84,7 @@ export function Engine() {
     setInspBusy(false);
     navigator.storage?.estimate?.().then((e) => setCacheMB((e.usage ?? 0) / 1048576)).catch(() => {});
   };
-  const clearCache = async () => { await caches.delete("kasauti-model-v1"); setCacheMB(0); };
+  const clearCache = async () => { await caches.delete(CACHE_NAME); setCacheMB(0); };
 
   return (
     <>
@@ -63,7 +116,9 @@ export function Engine() {
           <div className="card-head"><div><h3>Model delivery</h3><p>Opt-in download · Cache API · circuit breaker</p></div></div>
           <div className="stack">
             <div className="note">
-              {cap?.deferDownload ? "Save-Data / 2G detected — download deferred. Tier-0 checking stays fully active." : "Deep checking downloads the quantized checker once (tens–low hundreds of MB) and then works offline."}
+              {cap?.deferDownload
+                ? "Save-Data / 2G detected — download deferred. Tier-0 checking stays fully active; you can still force the download."
+                : `Deep checking fetches the quantized checker once — hundreds of MB for the multilingual INT8 graph, less on the 4-bit WebGPU path — verifies every byte against the manifest, and then works offline.`}
             </div>
             <dl className="kv">
               <dt>Status</dt><dd><b>{model?.status}</b></dd>
@@ -117,12 +172,13 @@ export function Engine() {
           </div>
         </article>
         <article className="card">
-          <div className="card-head"><div><h3>Calibration manifest</h3><p>Shipped as a JSON sidecar next to the weights</p></div></div>
+          <div className="card-head"><div><h3>Calibration manifest</h3><p>{model ? "Exactly what this device loaded" : "The shape the Worker expects (nothing loaded yet)"}</p></div></div>
           <dl className="kv">
-            <dt>Model version</dt><dd>{DEFAULT_MANIFEST.modelVersion}</dd>
-            <dt>max_len / head_max_len</dt><dd>{DEFAULT_MANIFEST.maxLen} / {DEFAULT_MANIFEST.headMaxLen}</dd>
-            <dt>Temperature buckets</dt><dd>{Object.keys(DEFAULT_MANIFEST.temperatures).length || "none yet (T = 1)"}</dd>
-            {Object.entries(DEFAULT_MANIFEST.abstain).map(([b, v]) => <Fragment key={b}><dt>Abstain below · {b}</dt><dd>{v}</dd></Fragment>)}
+            <dt>Model version</dt><dd>{man.modelVersion}</dd>
+            <dt>max_len / head_max_len</dt><dd>{man.maxLen} / {man.headMaxLen}</dd>
+            <dt>Temperature buckets</dt><dd>{Object.keys(man.temperatures).length || "none (T = 1)"}</dd>
+            {Object.entries(man.abstain).map(([b, v]) => <Fragment key={b}><dt>Abstain below · {b}</dt><dd>{v}</dd></Fragment>)}
+            <dt>Artefacts verified</dt><dd>{model ? `${model.graph?.path ?? "—"} · ${model.tokenizer?.bytes ? (model.tokenizer.bytes / 1048576).toFixed(1) + " MB tokenizer" : "tokenizer —"}` : "—"}</dd>
           </dl>
           <div className="note" style={{ marginTop: 12 }}>
             Design rules from Laya’s published limits: ≤20 options per choice (Banking77 collapse), option-order augmentation, <span className="mono">score</span> treated as weakest primitive, gate on <span className="mono">confidence</span> not <span className="mono">act_probability</span> (#185), and per-bucket temperature refit (ECE 0.314 → 0.106 on multilingual).
@@ -130,9 +186,34 @@ export function Engine() {
         </article>
       </section>
 
+      <section className="card" id="eval-gates">
+        <div className="card-head">
+          <div><h3>Eval gates · what the export claims</h3><p>The pipeline refuses to publish below these, and the browser shows the numbers the manifest carries instead of asserting quality.</p></div>
+          <span className={`chip ${evalRows.length ? (evalRows.every((r) => r.ok) ? "ok" : "warn") : "neutral"}`}>{evalRows.length ? (evalRows.every((r) => r.ok) ? "all gates met" : `${evalRows.filter((r) => !r.ok).length} below gate`) : "no numbers published"}</span>
+        </div>
+        {evalRows.length === 0 ? (
+          <div className="empty">This export published no eval block (a dev/plumbing model), so there is nothing to show — and nothing to trust: the runtime stays in report-only mode.</div>
+        ) : (
+          <div className="stack" style={{ gap: 6 }}>
+            {evalRows.map((r) => (
+              <div className="tier" key={r.key}>
+                <div className="tier-n" style={{ background: "var(--glass-2)", fontSize: 11 }}>{r.valueText}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="row between"><b style={{ fontSize: 12.5 }}>{r.label}</b><span className={`chip ${r.ok ? "ok" : "warn"}`}>{r.valueText} · gate {r.gateText}</span></div>
+                  <div className="muted" style={{ fontSize: 11.5 }}>{r.note}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="note" style={{ marginTop: 10 }}>
+          Thresholds mirror <span className="mono">ml/kasauti_ml/evals.py :: DEFAULT_GATES</span>; the trainer enforces them on the held-out set and <span className="mono">pipeline.py</span> exits non-zero below 0.95 quantized agreement, so a broken INT8 build can never reach this page.
+        </div>
+      </section>
+
       <section className="card" id="tokenizer-dry-run">
         <div className="card-head">
-          <div><h3>Tokenizer dry-run · exact Laya input</h3><p>Fetches only the real <span className="mono">laya-multilingual</span> tokenizer (≈34 MB, cached) and builds the <span className="mono">claim_v1</span> triage sequence in the Worker — verifiable before any ONNX graph is published.</p></div>
+          <div><h3>Tokenizer dry-run · exact Laya input</h3><p>Loads only the published, vocabulary-pruned <span className="mono">tokenizer.json</span> from the model repo and builds the <span className="mono">claim_v1</span> triage sequence in the Worker with the pure-TS tokenizer — verifiable before any ONNX graph is published, and byte-identical to the Rust tokenizer the model was trained with.</p></div>
         </div>
         <div className="row" style={{ flexWrap: "nowrap" }}>
           <label htmlFor="probe" className="sr-only">Message to tokenize</label>
@@ -142,7 +223,7 @@ export function Engine() {
         {insp ? (
           <div className="grid row-2b" style={{ marginTop: 12 }}>
             <dl className="kv">
-              <dt>Sequence length</dt><dd><b>{insp.ids}</b> / {DEFAULT_MANIFEST.maxLen} tokens</dd>
+              <dt>Sequence length</dt><dd><b>{insp.ids}</b> / {man.maxLen} tokens</dd>
               <dt>[MASK] option markers</dt><dd className="mono">{insp.markers.join(", ")}</dd>
               <dt>CLS / SEP / MASK ids</dt><dd className="mono">{insp.special.cls} / {insp.special.sep} / {insp.special.mask}</dd>
               <dt>Build time</dt><dd>{insp.ms.toFixed(1)} ms</dd>

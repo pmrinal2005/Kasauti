@@ -23,7 +23,19 @@ interface Outcome {
   local: { rung: string; ts: number } | null;
   evidence: Evidence[];
   score: number;
-  t1: { triage?: Answer; followups: Record<string, Answer>; ms: number; modelVersion: string; backend: string } | null;
+  t1: {
+    triage?: Answer;
+    followups: Record<string, Answer>;
+    ms: number;
+    modelVersion: string;
+    backend: string;
+    /** false = the export published no usable calibration, so its answers are never acted on */
+    calibrated: boolean;
+    /** non-null when the export was trained on different question wording than this runtime asks */
+    banksMismatch: string | null;
+    abstained: { count: number; of: number };
+    tokens: { batch: number; seqLen: number; markers: number };
+  } | null;
   finalRung: Rung;
 }
 
@@ -89,7 +101,19 @@ export function Checker() {
     if (t0.families.secrecy) flagged.add("secrecy");
     const fu = triage.abstained ? {} : planFollowups(triage.choice!, flagged, cap.questionBudget);
     const fr = Object.keys(fu).length ? await predictTier1(s, fu) : null;
-    return { triage, followups: fr?.answers ?? {}, ms: tri.ms + (fr?.ms ?? 0), modelVersion: tri.modelVersion, backend: tri.backend };
+    const answers = { triage, ...(fr?.answers ?? {}) };
+    const values = Object.values(answers);
+    return {
+      triage,
+      followups: fr?.answers ?? {},
+      ms: tri.ms + (fr?.ms ?? 0),
+      modelVersion: tri.modelVersion,
+      backend: tri.backend,
+      calibrated: tri.calibrated,
+      banksMismatch: tri.banksMismatch,
+      abstained: { count: values.filter((a) => a.abstained).length, of: values.length },
+      tokens: fr?.tokens ?? tri.tokens,
+    };
   }
 
   function toggleMic() {
@@ -168,8 +192,29 @@ export function Checker() {
               {out.shared && <div className="note">Shared cache: this exact text was seen <b>{out.shared.hits}×</b> before (verdict: {out.shared.rung.replace("_", " ")}).</div>}
               {out.t1 && (
                 <div className="note">
-                  <b>Laya Tier-1</b> ({out.t1.backend}, {out.t1.ms.toFixed(0)} ms): triage = <b>{out.t1.triage?.choice}</b> ({((out.t1.triage?.confidence ?? 0) * 100).toFixed(0)}% conf{out.t1.triage?.abstained ? ", abstained" : ""})
-                  {Object.entries(out.t1.followups).map(([k, a]) => <div key={k} className="mono">{k}: p={(a.noul ?? 0).toFixed(2)}{a.abstained ? " (abstain)" : ""}</div>)}
+                  <div className="row between" style={{ alignItems: "baseline" }}>
+                    <div>
+                      <b>Laya Tier-1</b> ({out.t1.backend}, {out.t1.ms.toFixed(0)} ms): triage = <b>{out.t1.triage?.choice}</b> ({((out.t1.triage?.confidence ?? 0) * 100).toFixed(0)}% conf{out.t1.triage?.abstained ? ", abstained" : ""})
+                      {Object.entries(out.t1.followups).map(([k, a]) => <div key={k} className="mono">{k}: p={(a.noul ?? 0).toFixed(2)}{a.abstained ? " (abstain)" : ""}</div>)}
+                    </div>
+                    <span className={`chip ${out.t1.calibrated ? "ok" : "warn"}`}>{out.t1.calibrated ? "calibrated" : "uncalibrated · report-only"}</span>
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                    {out.t1.abstained.count} of {out.t1.abstained.of} answers sat below the abstention threshold
+                    {out.t1.abstained.count === out.t1.abstained.of ? " — so nothing above changed the verdict; the ladder is still the deterministic one" : ""}.
+                    {" "}{out.t1.tokens.seqLen} tokens, {out.t1.tokens.markers} option markers, {out.t1.modelVersion}
+                  </div>
+                  {out.t1.banksMismatch && (
+                    <div className="muted" style={{ fontSize: 12, marginTop: 4, color: "var(--warn)" }}>
+                      Question-bank drift: {out.t1.banksMismatch} The numbers above are shown for transparency but carry no weight in the verdict.
+                    </div>
+                  )}
+                </div>
+              )}
+              {!out.t1 && (model.status === "deferred" || model.status === "unpublished" || model.status === "idle") && (
+                <div className="note">
+                  <b>Deep checking is off</b> — {model.status === "deferred" ? "Data Saver on your connection asked to be spared the download" : model.status === "unpublished" ? "no calibrated ONNX export is published yet" : "the model has not been enabled on this device"}.
+                  {" "}The verdict above is deterministic (Tier-0) only. That is the tier we trust for acting: no model was consulted, so none can be wrong.
                 </div>
               )}
               {(m!.step >= 2) && (

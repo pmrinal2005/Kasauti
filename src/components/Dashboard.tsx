@@ -4,6 +4,7 @@ import { Shell } from "./Shell";
 import { useStore } from "@/lib/store";
 import { Overview } from "./views/Overview";
 import { Checker } from "./views/Checker";
+import { Lens } from "./views/Lens";
 import { Voice } from "./views/Voice";
 import { Engine } from "./views/Engine";
 import { Registry } from "./views/Registry";
@@ -22,6 +23,7 @@ export function Dashboard() {
     <Shell>
       {!hydrated ? <div className="empty">Loading…</div> :
         view === "checker" ? <Checker /> :
+        view === "lens" ? <Lens /> :
         view === "voice" ? <Voice /> :
         view === "engine" ? <Engine /> :
         view === "registry" ? <Registry /> :

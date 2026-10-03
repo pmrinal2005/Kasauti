@@ -6,7 +6,13 @@ export interface Concept {
   id: string;
   title: string;
   family: "basics" | "costs" | "risk" | "red_flags" | "safety";
-  keys: string[]; // routing keywords (Tier-0 intent router until Laya intent_concepts_v1 is published)
+  /**
+   * Routing keywords for the Tier-0 lexical router. Coverage here is deliberately conservative —
+   * a wrong direct hit is worse than a near miss that shows the disambiguation cards — and the
+   * list is expected to grow from real transcripts, not from guesses. When a calibrated
+   * `intent_concepts_v1` export is loaded, Laya refines this routing (see views/Voice.tsx).
+   */
+  keys: string[];
   text: Record<"en-IN" | "hi-IN", string>;
 }
 
@@ -29,7 +35,9 @@ export const CONCEPTS: Concept[] = [
     text: { "en-IN": "No market investment registered with SEBI can promise a guaranteed return. If someone says 'guaranteed', 'fixed daily profit' or 'zero risk', treat it as a warning sign and verify the person on SEBI's website.", "hi-IN": "SEBI में रजिस्टर्ड कोई भी बाज़ार निवेश गारंटीड रिटर्न का वादा नहीं कर सकता। 'गारंटी', 'रोज़ का पक्का मुनाफ़ा' या 'ज़ीरो रिस्क' सुनें तो सावधान रहें।" } },
   { id: "vip_group", title: "“VIP tips group” — a red flag", family: "red_flags", keys: ["vip", "group", "telegram", "whatsapp group", "tips", "ग्रुप"],
     text: { "en-IN": "The most common investment scam starts with an invitation to a VIP WhatsApp or Telegram group that shares 'winning tips', then moves you to a fake trading app that shows fake profits. Real advisers are registered and never ask you to pay into personal UPI IDs.", "hi-IN": "सबसे आम निवेश ठगी VIP व्हाट्सऐप या टेलीग्राम ग्रुप के न्योते से शुरू होती है, फिर नकली ट्रेडिंग ऐप पर नकली मुनाफ़ा दिखाया जाता है। असली सलाहकार रजिस्टर्ड होते हैं।" } },
-  { id: "digital_arrest", title: "“Digital arrest” — always a scam", family: "safety", keys: ["digital arrest", "cbi", "police", "arrest", "customs", "अरेस्ट"],
+  // The safest script for "someone defrauded me, what now?" is this one — it is the only concept that
+  // ends with the 1930 / cybercrime.gov.in path — so the reporting vocabulary lives here too.
+  { id: "digital_arrest", title: "“Digital arrest” — always a scam", family: "safety", keys: ["digital arrest", "cbi", "police", "arrest", "customs", "अरेस्ट", "report fraud", "report a fraud", "fraud report", "cybercrime", "1930", "helpline", "money back", "ठगी", "धोखाधड़ी"],
     text: { "en-IN": "There is no such thing as a digital arrest. Real police, CBI, customs or SEBI officials never keep you on a video call or ask you to transfer money to clear your name. Hang up, call your trusted contact, and call 1930.", "hi-IN": "डिजिटल अरेस्ट जैसी कोई चीज़ नहीं होती। असली पुलिस या CBI कभी वीडियो कॉल पर रोककर पैसे नहीं मंगवाती। फ़ोन काटें, अपने भरोसेमंद व्यक्ति को बताएं, और 1930 पर कॉल करें।" } },
 ];
 
@@ -42,4 +50,40 @@ export function routeConcept(transcript: string): { concept: Concept | null; alt
   // abstain when two concepts tie — show disambiguation cards instead of guessing
   if (margin === 0) return { concept: null, alternatives: scored.slice(0, 3).map((x) => x.c), score: top.s };
   return { concept: top.c, alternatives: scored.slice(1, 4).map((x) => x.c), score: top.s };
+}
+
+/** Lookup by concept id — the concept library is the addressable set of spoken scripts. */
+export const CONCEPT_BY_ID: Record<string, Concept> = Object.fromEntries(CONCEPTS.map((c) => [c.id, c]));
+
+/**
+ * The Laya `intent_concepts_v1` bank and this library grew separately, so their keys differ in two
+ * places. The bank is the authority for *routing*; this map is the authority for *what we can say*.
+ * A bank key with no script (exit_load) resolves to null, and the caller offers the family instead
+ * of inventing an answer.
+ */
+export const BANK_KEY_TO_CONCEPT: Record<string, string> = {
+  guaranteed: "guaranteed_return",
+  reporting: "digital_arrest",
+  fraud_report: "digital_arrest",
+  vip_tips: "vip_group",
+};
+
+/** When Laya names a family but no leaf concept, the family's safest script is offered instead. */
+export const FAMILY_FALLBACK: Record<string, string> = {
+  basics: "nav",
+  costs: "expense_ratio",
+  risk: "diversification",
+  red_flags: "guaranteed_return",
+  safety: "nomination",
+};
+
+export function conceptForBankKey(key: string | undefined): Concept | null {
+  if (!key) return null;
+  return CONCEPT_BY_ID[key] ?? CONCEPT_BY_ID[BANK_KEY_TO_CONCEPT[key] ?? ""] ?? null;
+}
+
+/** Resolve a bank family (triage choice) to something we can actually speak. */
+export function conceptForFamily(family: string | undefined): Concept | null {
+  if (!family) return null;
+  return CONCEPT_BY_ID[family] ?? conceptForBankKey(FAMILY_FALLBACK[family]);
 }

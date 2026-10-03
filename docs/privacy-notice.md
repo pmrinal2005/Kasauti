@@ -13,9 +13,23 @@
 | Model download | Hugging Face CDN (public model repo) | A normal file download; no message data is sent |
 
 ## The one documented exception: phone calls (IVR)
-There is no browser on a feature-phone call, so the telephony channel (when sponsored) uses the
-telephony provider's transcription. That channel is **not built yet**; when it is, it will live in an
-isolated `server/telephony/` module, will never be used by the website or app, and will be disclosed here.
+There is no browser on a feature-phone call, so the telephony channel cannot do speech-to-text on the
+device. It is served by `/api/ivr`, and the rules are:
+
+- it is **off unless `IVR_ENABLED=1`**, and `/api/health` reports `audioRoutes: 1` only then. A normal
+  deploy answers `audioRoutes: 0`;
+- your telephony provider (Exotel, Twilio, Plivo…) records and transcribes the call under **its**
+  policy — that is unavoidable on a phone line, and it is why this channel is a separate, documented
+  exception rather than something we quietly do;
+- Kasauti receives only the transcribed text, runs the same deterministic on-device checker on the
+  server for that one call, and **stores neither the audio nor the transcript**;
+- the answer is a fixed spoken line for the verdict, in English or Hindi. No language model is on the
+  phone line, so nothing can be invented on it;
+- what is kept is the same record the website keeps for a cache hit: a SHA-256 of the normalised text
+  plus evidence codes — no text, no phone number, no call id (caller ids are hashed and only used as
+  an in-memory rate-limit key).
+- the phone path is **unverified against a live provider** as of this build. Treat it as ready to
+  wire up, not as a working helpline.
 
 ## What Kasauti never does
 - No `/api/asr` route exists; no audio upload code path exists on the web surface.

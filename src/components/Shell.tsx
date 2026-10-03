@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { go, hydrate, setLang, useStore, type Lang, type View } from "@/lib/store";
-import { IBook, ICpu, IGrid, ILock, IMenu, IMic, IMoon, ISearch, IShield, ISidebar, ISun, IDb, IBell } from "./icons";
+import { IBook, IBell, ICpu, IDb, IEye, IGrid, ILock, IMenu, IMic, IMoon, ISearch, IShield, ISidebar, ISun } from "./icons";
 import { CONCEPTS } from "@/lib/concepts";
 
 const NAV: Array<{ id: View; label: string; icon: (p: React.SVGProps<SVGSVGElement>) => React.ReactElement; badge?: string; group: string }> = [
   { id: "overview", label: "Overview", icon: IGrid, group: "Monitor" },
   { id: "checker", label: "Message Checker", icon: IShield, badge: "T0·T1", group: "Protect" },
+  { id: "lens", label: "Content Lens", icon: IEye, badge: "lens_v1", group: "Protect" },
   { id: "voice", label: "Voice Explainer", icon: IMic, group: "Protect" },
   { id: "registry", label: "Registry & Calculators", icon: IDb, group: "Protect" },
   { id: "engine", label: "On-Device Engine", icon: ICpu, badge: "Laya", group: "System" },

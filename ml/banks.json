@@ -1,0 +1,243 @@
+{
+  "version": "1.0.0",
+  "note": "Single source of truth for every Laya question bank Kasauti uses. The Python trainer reads this file directly; `ml/scripts/gen_banks_ts.py` regenerates `src/lib/banks.ts` so the runtime and the trainer can never drift apart. Questions are flat `choice` / `score` / `noul` only — never nested objects or arrays (Laya's typed-decision contract), and never more than 20 options in a single `choice` (accuracy collapses above that).",
+  "tasks": {
+    "claim_v1": {
+      "title": "Claim evidence-checker",
+      "purpose": "Classify a forwarded message/SMS/voice-note transcript before any evidence fusion happens.",
+      "triage": {
+        "type": "choice",
+        "instructions": "What kind of financial message is this?",
+        "criteria": {
+          "investment_offer": "promises returns, tips, trading groups or schemes",
+          "authority_threat": "claims to be police, CBI, customs, bank or regulator and threatens action",
+          "payment_request": "asks to pay a fee, tax, deposit or transfer money",
+          "education": "explains a concept or warns about scams without selling anything",
+          "other": "anything else"
+        }
+      },
+      "followups": {
+        "investment_offer": {
+          "guaranteed": { "type": "noul", "instructions": "Does the message promise a guaranteed or risk-free return?" },
+          "pay_to_withdraw": { "type": "noul", "instructions": "Must the reader pay money before they can withdraw profits?" },
+          "unregistered_group": { "type": "noul", "instructions": "Does it invite the reader into a private tips or VIP group?" }
+        },
+        "authority_threat": {
+          "digital_arrest": { "type": "noul", "instructions": "Is the reader told to stay on a call or video under threat of arrest?" },
+          "secrecy": { "type": "noul", "instructions": "Is the reader told not to tell family or anyone else?" },
+          "transfer": { "type": "noul", "instructions": "Is the reader asked to transfer money to 'verify' or 'clear' their name?" }
+        },
+        "payment_request": {
+          "pay_to_withdraw": { "type": "noul", "instructions": "Is the payment described as a tax or fee to release the reader's own money?" },
+          "remote_app": { "type": "noul", "instructions": "Is the reader asked to install an app or share their screen?" }
+        },
+        "education": {
+          "selling": { "type": "noul", "instructions": "Despite sounding educational, does it push a specific product, stock or paid group?" }
+        },
+        "other": {}
+      }
+    },
+    "lens_v1": {
+      "title": "Content Lens — promotion vs education",
+      "purpose": "Place a piece of investment content on the SEBI promotion/education line.",
+      "triage": {
+        "type": "choice",
+        "instructions": "What does this content mainly do?",
+        "criteria": {
+          "teaches_concept": "explains how investing works with no call to action",
+          "reports_facts": "reports news, results or data with no recommendation",
+          "pushes_product": "asks the viewer to buy, subscribe, join or open an account",
+          "pushes_security": "names a specific stock, fund or scheme to buy or sell",
+          "fear_selling": "pressures the viewer with fear, urgency or a missed-opportunity claim",
+          "testimonial_lure": "leads with profit screenshots, luxury lifestyle or follower proof"
+        }
+      },
+      "followups": {
+        "teaches_concept": {
+          "disclosure": { "type": "noul", "instructions": "Does the creator state a SEBI registration number or a disclosure of interest?" },
+          "selling": { "type": "noul", "instructions": "Does it end with a course, group, affiliate link or paid signal offer?" }
+        },
+        "reports_facts": {
+          "selling": { "type": "noul", "instructions": "Does it go on to name a specific security as a buy or sell?" },
+          "disclosure": { "type": "noul", "instructions": "Does it disclose a position or a paid relationship?" }
+        },
+        "pushes_product": {
+          "guaranteed": { "type": "noul", "instructions": "Are the promised outcomes stated as guaranteed or risk-free?" },
+          "disclosure": { "type": "noul", "instructions": "Is the promotion disclosed as advertising or paid partnership?" }
+        },
+        "pushes_security": {
+          "target_claim": { "type": "noul", "instructions": "Does it state a price target or a 'sure-shot' outcome?" },
+          "disclosure": { "type": "noul", "instructions": "Does the creator disclose holding or being paid to promote it?" }
+        },
+        "fear_selling": {
+          "guaranteed": { "type": "noul", "instructions": "Does it promise safety or returns if the viewer acts now?" },
+          "urgency": { "type": "noul", "instructions": "Does it use a deadline, a limited slot or a coming crash to force action?" }
+        },
+        "testimonial_lure": {
+          "target_claim": { "type": "noul", "instructions": "Are the profits shown claimed as typical or repeatable?" },
+          "unregistered_group": { "type": "noul", "instructions": "Does it funnel viewers into a private group or channel?" }
+        }
+      }
+    },
+    "intent_concepts_v1": {
+      "title": "Voice-first concept router",
+      "purpose": "Map a spoken or typed question onto a closed set of investor-protection concepts.",
+      "triage": {
+        "type": "choice",
+        "instructions": "Which family of investing concepts is the user asking about?",
+        "criteria": {
+          "basics": "NAV, SIP, compounding, how a mutual fund works, what a folio is",
+          "costs": "expense ratio, exit load, brokerage, commission, TER, hidden charges",
+          "risk": "volatility, diversification, equity vs debt, drawdown, market cycles",
+          "red_flags": "guaranteed return, VIP tips groups, ponzi, unregistered advisers, fake apps",
+          "safety": "nomination, KYC, reporting fraud, digital arrest, 1930, freezing a transaction",
+          "unclear": "cannot tell from the wording"
+        }
+      },
+      "followups": {
+        "basics": {
+          "nav": { "type": "noul", "instructions": "Is the user asking what NAV or unit price means?" },
+          "sip": { "type": "noul", "instructions": "Is the user asking about SIP or monthly investing?" },
+          "compounding": { "type": "noul", "instructions": "Is the user asking how compounding or interest-on-interest works?" }
+        },
+        "costs": {
+          "expense_ratio": { "type": "noul", "instructions": "Is the user asking about the expense ratio or annual fund fee?" },
+          "exit_load": { "type": "noul", "instructions": "Is the user asking about exit load or charges on withdrawing?" }
+        },
+        "risk": {
+          "diversification": { "type": "noul", "instructions": "Is the user asking about spreading money across investments?" },
+          "volatility": { "type": "noul", "instructions": "Is the user asking why prices move up and down?" }
+        },
+        "red_flags": {
+          "guaranteed": { "type": "noul", "instructions": "Is the user asking about a 'guaranteed return' claim?" },
+          "vip_group": { "type": "noul", "instructions": "Is the user asking about a tips or VIP group invite?" }
+        },
+        "safety": {
+          "nomination": { "type": "noul", "instructions": "Is the user asking about nomination or a nominee?" },
+          "reporting": { "type": "noul", "instructions": "Is the user asking how to report a fraud or freeze a payment?" }
+        },
+        "unclear": {}
+      }
+    },
+    "report_v1": {
+      "title": "Community report triage (Suraksha Mandali)",
+      "purpose": "Triage a member's report before any text leaves the device.",
+      "triage": {
+        "type": "choice",
+        "instructions": "Which scam family does this community report describe?",
+        "criteria": {
+          "trading_app": "a fake trading app or website that blocks withdrawals",
+          "vip_group": "a tips or VIP group that collected money",
+          "impersonation": "someone posing as police, CBI, bank, regulator or a recovery agent",
+          "kyc_phishing": "a KYC, SIM or account-blocking message with a link",
+          "job_loan": "a job, task or loan offer that demanded a fee first",
+          "other": "something else"
+        }
+      },
+      "followups": {
+        "trading_app": {
+          "pay_to_withdraw": { "type": "noul", "instructions": "Did the app demand a fee or tax before releasing money?" },
+          "remote_app": { "type": "noul", "instructions": "Did it ask the member to install a screen-sharing app?" }
+        },
+        "vip_group": {
+          "guaranteed": { "type": "noul", "instructions": "Were guaranteed returns promised in the group?" },
+          "upi": { "type": "noul", "instructions": "Was money sent to a personal UPI ID or account?" }
+        },
+        "impersonation": {
+          "digital_arrest": { "type": "noul", "instructions": "Was the member kept on a video call under threat?" },
+          "secrecy": { "type": "noul", "instructions": "Was the member told not to tell anyone?" }
+        },
+        "kyc_phishing": {
+          "link": { "type": "noul", "instructions": "Did the message contain a link to update KYC?" },
+          "otp": { "type": "noul", "instructions": "Was the member asked for an OTP, PIN or CVV?" }
+        },
+        "job_loan": {
+          "advance_fee": { "type": "noul", "instructions": "Was an upfront fee, deposit or processing charge demanded?" },
+          "personal_docs": { "type": "noul", "instructions": "Were original documents or blank cheques demanded?" }
+        },
+        "other": {}
+      }
+    },
+    "impersonation_v1": {
+      "title": "Digital-arrest / impersonation guard",
+      "purpose": "Score what a caller said, so the user gets a calm, correct next step.",
+      "triage": {
+        "type": "choice",
+        "instructions": "What did the caller claim to be?",
+        "criteria": {
+          "police": "police, CBI, ED, customs or narcotics officer",
+          "regulator": "SEBI, RBI or an exchange official",
+          "bank": "bank, card or wallet support staff",
+          "delivery": "courier, telecom or electricity department",
+          "employer": "HR, recruiter or an existing employer",
+          "unknown": "identity is unclear or refused"
+        }
+      },
+      "followups": {
+        "police": {
+          "digital_arrest": { "type": "noul", "instructions": "Did they keep the user on a call or video under threat of arrest?" },
+          "transfer": { "type": "noul", "instructions": "Did they ask for a transfer to 'verify' funds or clear a name?" }
+        },
+        "regulator": {
+          "secrecy": { "type": "noul", "instructions": "Did they tell the user to keep the matter confidential from family?" },
+          "remote_app": { "type": "noul", "instructions": "Did they ask the user to install an app or share the screen?" }
+        },
+        "bank": {
+          "otp": { "type": "noul", "instructions": "Did they ask for an OTP, PIN, CVV or a screen share?" },
+          "urgency": { "type": "noul", "instructions": "Did they claim the account would be blocked within minutes?" }
+        },
+        "delivery": {
+          "kyc_threat": { "type": "noul", "instructions": "Did they link the call to a KYC, SIM or connection problem?" },
+          "link": { "type": "noul", "instructions": "Did they send a link to 'complete' a form or payment?" }
+        },
+        "employer": {
+          "advance_fee": { "type": "noul", "instructions": "Was a fee, deposit or security amount requested?" },
+          "personal_docs": { "type": "noul", "instructions": "Were Aadhaar, PAN or bank documents requested over chat?" }
+        },
+        "unknown": {}
+      }
+    },
+    "resolution_v1": {
+      "title": "Corporate-action / AGM notice decoder",
+      "purpose": "Explain what a notice actually asks the shareholder to decide.",
+      "triage": {
+        "type": "choice",
+        "instructions": "What kind of corporate action or resolution is this?",
+        "criteria": {
+          "dividend": "dividend, interim dividend or record-date notice",
+          "bonus_split": "bonus issue, stock split or rights issue",
+          "merger": "merger, demerger, buyback or delisting",
+          "board_election": "director appointment, reappointment or removal",
+          "remuneration": "managerial remuneration, ESOP or related-party approval",
+          "routine": "adoption of accounts, auditor appointment or other routine business"
+        }
+      },
+      "followups": {
+        "dividend": {
+          "record_date_effect": { "type": "noul", "instructions": "Does the notice explain that shares bought after the record date will not receive it?" },
+          "tax_note": { "type": "noul", "instructions": "Does it mention tax deducted at source on the dividend?" }
+        },
+        "bonus_split": {
+          "share_count_change": { "type": "noul", "instructions": "Will the number of shares held change without any new money being paid?" },
+          "dilution": { "type": "noul", "instructions": "Does it involve new shares that dilute existing holders (rights or preferential issue)?" }
+        },
+        "merger": {
+          "share_exchange": { "type": "noul", "instructions": "Will the shares be exchanged for another company's shares or cash?" },
+          "exit_option": { "type": "noul", "instructions": "Is there a buyback or exit price offered to holders?" }
+        },
+        "board_election": {
+          "independence": { "type": "noul", "instructions": "Does the resolution concern an independent director?" },
+          "term_details": { "type": "noul", "instructions": "Does it state the term and the number of directorships held?" }
+        },
+        "remuneration": {
+          "related_party": { "type": "noul", "instructions": "Is a related party or promoter involved in the approval?" },
+          "cap_stated": { "type": "noul", "instructions": "Is a monetary cap or ceiling stated for the approval?" }
+        },
+        "routine": {
+          "auditor_change": { "type": "noul", "instructions": "Is a change of auditor proposed?" },
+          "accounts_adopted": { "type": "noul", "instructions": "Are the audited accounts being adopted without qualification?" }
+        }
+      }
+    }
+  }
+}
