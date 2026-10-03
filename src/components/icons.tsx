@@ -1,0 +1,30 @@
+import type { SVGProps } from "react";
+
+const base = { fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round", viewBox: "0 0 24 24" } as const;
+type P = SVGProps<SVGSVGElement>;
+const mk = (d: React.ReactNode) => function Icon(p: P) { return <svg {...base} aria-hidden="true" {...p}>{d}</svg>; };
+
+export const IGrid = mk(<><rect x="3" y="3" width="7" height="7" rx="2" /><rect x="14" y="3" width="7" height="7" rx="2" /><rect x="3" y="14" width="7" height="7" rx="2" /><rect x="14" y="14" width="7" height="7" rx="2" /></>);
+export const IShield = mk(<><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z" /><path d="M9 12l2 2 4-4" /></>);
+export const IBook = mk(<><path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2V5z" /><path d="M4 19a2 2 0 012-2h13" /></>);
+export const ICalc = mk(<><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M8 7h8M8 12h2M14 12h2M8 16h2M14 16h2" /></>);
+export const ICpu = mk(<><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></>);
+export const ILock = mk(<><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 018 0v4" /></>);
+export const ISearch = mk(<><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></>);
+export const IMenu = mk(<><path d="M4 6h16M4 12h16M4 18h16" /></>);
+export const ISidebar = mk(<><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16" /></>);
+export const ISun = mk(<><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>);
+export const IMoon = mk(<path d="M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z" />);
+export const IMic = mk(<><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0014 0M12 18v3" /></>);
+export const ISpeaker = mk(<><path d="M11 5L6 9H3v6h3l5 4V5z" /><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13" /></>);
+export const IBolt = mk(<path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" />);
+export const IAlert = mk(<><path d="M12 3l9.5 17h-19L12 3z" /><path d="M12 10v4M12 17.5v.01" /></>);
+export const IDb = mk(<><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" /></>);
+export const IUsers = mk(<><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0113 0M16 4.5a3.5 3.5 0 010 7M21.5 20a6.5 6.5 0 00-4-6" /></>);
+export const IPhone = mk(<path d="M5 3h4l2 5-2.5 1.5a11 11 0 006 6L16 13l5 2v4a2 2 0 01-2 2A17 17 0 013 5a2 2 0 012-2z" />);
+export const IBell = mk(<><path d="M6 8a6 6 0 0112 0c0 7 3 8 3 8H3s3-1 3-8" /><path d="M10 20a2 2 0 004 0" /></>);
+export const IClose = mk(<path d="M6 6l12 12M18 6L6 18" />);
+export const ICheck = mk(<path d="M5 12l5 5L20 7" />);
+export const IDownload = mk(<><path d="M12 3v12M7 10l5 5 5-5" /><path d="M4 21h16" /></>);
+export const ISpark = mk(<path d="M12 3l1.8 5.4L19 10l-5.2 1.6L12 17l-1.8-5.4L5 10l5.2-1.6L12 3z" />);
+export const IChart = mk(<><path d="M3 3v18h18" /><path d="M7 15l4-4 3 3 5-6" /></>);
