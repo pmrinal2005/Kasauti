@@ -10,7 +10,7 @@ const FLOWS = [
   { what: "Text → voice", where: "Your device (speechSynthesis)", leaves: "Never", tone: "ok" },
   { what: "Verdict fingerprint", where: "Shared cache (/api/v)", leaves: "SHA-256 + SimHash + codes only, no raw text", tone: "info" },
   { what: "“Why?” explanation", where: "Groq (text-only)", leaves: "Only when you tap “Why?”", tone: "info" },
-  { what: "Telephony / IVR", where: "Telephony provider", leaves: "The one documented exception — no browser on a phone call", tone: "warn" },
+  { what: "Telephony / IVR (not built yet)", where: "Telephony provider", leaves: "The one documented exception — no browser on a phone call", tone: "warn" },
 ];
 
 export function Privacy() {
@@ -42,9 +42,9 @@ export function Privacy() {
             <dt>Checks on this device</dt><dd>{checks.length}</dd>
           </dl>
           <div className="stack" style={{ marginTop: 14, gap: 6 }}>
-            {["No /api/asr route exists", "Raksha trusted contact stored only on device", "Model weights are public — no secret logic inside", "Abuse limits live on write paths only"].map((t) => <div key={t} className="row" style={{ gap: 8, flexWrap: "nowrap", fontSize: 12.5 }}><ICheck width={15} style={{ color: "var(--ok)", flex: "none" }} />{t}</div>)}
+            {["No /api/asr route exists", "Check history + verdict cache stored only on device", "Model weights are public — no secret logic inside", "Abuse limits live on write paths only"].map((t) => <div key={t} className="row" style={{ gap: 8, flexWrap: "nowrap", fontSize: 12.5 }}><ICheck width={15} style={{ color: "var(--ok)", flex: "none" }} />{t}</div>)}
           </div>
-          <button className="btn" style={{ marginTop: 16 }} onClick={() => { if (confirm("Delete all checks stored on this device?")) clearChecks(); }}>Erase local history</button>
+          <button className="btn" style={{ marginTop: 16 }} onClick={() => { if (confirm("Delete all checks stored on this device?")) { clearChecks(); try { localStorage.removeItem("kasauti.verdicts.v1"); } catch { /* ignore */ } } }}>Erase local history</button>
         </article>
       </section>
     </>

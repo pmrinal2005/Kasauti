@@ -8,6 +8,9 @@ import { sha256Hex, simhash64 } from "./fingerprint";
 import { AhoCorasick, FAMILY_META, LEXICON, type FlagFamily } from "./lexicon";
 import { extractEntities, type Entities } from "./entities";
 import { lookupRegistration, type RegistryEntry } from "./registry";
+import { band, fmtPct, IMPLAUSIBLE_ANNUAL, PLAUSIBLE_ANNUAL } from "./plausibility";
+
+export { fmtPct };
 
 export type Rung = "safe_pattern" | "unclear" | "caution" | "likely_scam" | "known_scam";
 
@@ -44,9 +47,6 @@ export interface Tier0Result {
 let AC: AhoCorasick | null = null;
 const automaton = () => (AC ??= new AhoCorasick(LEXICON));
 
-/** FD/RBI-repo-anchored plausibility ceiling: anything above ~30%/yr "guaranteed" is implausible. */
-const PLAUSIBLE_ANNUAL = 15;
-const IMPLAUSIBLE_ANNUAL = 30;
 
 export function rungFromScore(score: number, families: number): Rung {
   if (score >= 9 && families >= 3) return "known_scam";
@@ -87,7 +87,7 @@ export async function runTier0(raw: string): Promise<Tier0Result> {
         code: "PLAUS_RETURN",
         label: "Implausible return",
         detail: `${r.percent}% per ${r.period} ≈ ${fmtPct(r.annualised)} per year compounded — far above the ~${PLAUSIBLE_ANNUAL}% long-run ceiling of real assets.`,
-        weight: r.annualised > 200 ? 4 : 2.5,
+        weight: band(r.annualised) === "impossible" ? 4 : 2.5,
         source: "plausibility",
       });
     }
@@ -134,8 +134,59 @@ export async function runTier0(raw: string): Promise<Tier0Result> {
   return { hash, simhash, normalized: text, families, entities, registry, evidence, score, rung, confidence, elapsedMs: performance.now() - t0 };
 }
 
-export function fmtPct(v: number): string {
-  if (v >= 1e6) return "astronomically";
-  if (v >= 1000) return `${Math.round(v).toLocaleString("en-IN")}%`;
-  return `${v.toFixed(1)}%`;
+/* ------------------------------ Tier-1 fusion ------------------------------ */
+
+/** Minimal shape of a calibrated Laya answer (see laya-client-browser.Answer). */
+export interface T1Answer {
+  noul?: number;
+  choice?: string;
+  confidence: number;
+  abstained: boolean;
+}
+
+/** Weight each confident "yes" follow-up adds. Strong scripts (pay-to-withdraw, digital arrest) weigh more. */
+export const T1_WEIGHTS: Record<string, number> = {
+  pay_to_withdraw: 3, digital_arrest: 3, transfer: 2.5, guaranteed: 2, secrecy: 2, remote_app: 2.5, unregistered_group: 1.5, selling: 1.5,
+};
+export const T1_YES = 0.7; // calibrated p(yes) needed to add evidence
+
+export interface FusedVerdict {
+  rung: Rung;
+  score: number;
+  evidence: Evidence[];
+  tier: "T0" | "T0+T1";
+}
+
+/**
+ * Transparent rule table: Tier-0 evidence + confident, non-abstained Laya answers.
+ * Laya can only ADD evidence or soften a weak Tier-0 result when it confidently says "education";
+ * it can never override hard deterministic proof (pay-to-withdraw lexicon, registry mismatch).
+ */
+export function fuseTier1(t0: Pick<Tier0Result, "evidence" | "families" | "score">, triage: T1Answer | null, followups: Record<string, T1Answer>): FusedVerdict {
+  const evidence = [...t0.evidence];
+  let score = t0.score;
+  let extraFamilies = 0;
+  if (!triage) {
+    const fam = Object.keys(t0.families).filter((f) => f !== "defensive").length;
+    return { rung: rungFromScore(score, fam), score, evidence, tier: "T0" };
+  }
+  for (const [k, a] of Object.entries(followups)) {
+    if (a.abstained || a.noul === undefined) continue;
+    if (a.noul >= T1_YES) {
+      const w = T1_WEIGHTS[k] ?? 1.5;
+      score += w;
+      extraFamilies++;
+      evidence.push({ code: `LAYA_${k.toUpperCase()}`, label: `Laya: ${k.replace(/_/g, " ")}`, detail: `On-device model answered “yes” with p=${a.noul.toFixed(2)} (confidence ${(a.confidence * 100).toFixed(0)}%).`, weight: w, source: "laya" });
+    }
+  }
+  const hardProof = t0.evidence.some((e) => e.weight >= 4 && e.source !== "laya");
+  if (!triage.abstained && triage.choice === "education" && !hardProof && score < 5.5) {
+    const sellingYes = (followups.selling?.noul ?? 0) >= T1_YES;
+    if (!sellingYes) {
+      score = Math.max(0, score - 1.5);
+      evidence.push({ code: "LAYA_EDUCATION", label: "Laya: educational content", detail: `Triage classified this as education (confidence ${(triage.confidence * 100).toFixed(0)}%).`, weight: -1.5, source: "laya" });
+    }
+  }
+  const fam = Object.keys(t0.families).filter((f) => f !== "defensive").length + extraFamilies;
+  return { rung: rungFromScore(score, fam), score, evidence, tier: "T0+T1" };
 }

@@ -1,4 +1,7 @@
 /** Deterministic entity extraction + checks (UPI handle, caller series, money, returns). */
+import { annualise, type Period } from "./plausibility";
+
+export { annualise };
 
 // Known NPCI-registered PSP handles (subset). Unknown handles are a soft signal, not proof.
 const UPI_PSP = new Set([
@@ -23,7 +26,7 @@ export interface MoneyHit {
 export interface ReturnClaim {
   raw: string;
   percent: number;
-  period: "day" | "week" | "month" | "year" | "unknown";
+  period: Period;
   annualised: number; // compounded, in %
 }
 
@@ -41,7 +44,7 @@ const PHONE_RE = /(?:\+?\d[\d\s-]{8,15}\d)/g;
 const URL_RE = /\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)+(?:com|in|net|org|io|xyz|top|club|app|site|online|info|co|me|link|live)(?:\/[^\s]*)?/g;
 const MONEY_RE = /(?:₹|rs\.?|inr|rupees?)\s?([\d,]+(?:\.\d+)?)\s?(lakh|lac|lakhs|crore|cr|k|thousand)?|([\d,]+(?:\.\d+)?)\s?(lakh|lac|lakhs|crore|cr)\b/g;
 const RETURN_RE = /(\d{1,4}(?:\.\d+)?)\s?%\s*(?:return|profit|returns|interest|gain|munafa|मुनाफा|रिटर्न)?\s*(?:per|a|every|\/|in|प्रति)?\s*(day|daily|week|weekly|month|monthly|year|yearly|annum|annual|p\.a\.|pa|din|mahina|महीना|दिन|साल)?/g;
-const REG_RE = /\b(in[ah]\d{9})\b/g;
+const REG_RE = /\b(in[ah]\d{9})\b/gi;
 
 const UNIT: Record<string, number> = { lakh: 1e5, lac: 1e5, lakhs: 1e5, crore: 1e7, cr: 1e7, k: 1e3, thousand: 1e3 };
 
@@ -52,14 +55,6 @@ function periodOf(p?: string): ReturnClaim["period"] {
   if (/^(month|mahina|महीना)/.test(p)) return "month";
   if (/^(year|annum|annual|p\.?a|साल)/.test(p)) return "year";
   return "unknown";
-}
-
-const PERIODS_PER_YEAR = { day: 365, week: 52, month: 12, year: 1, unknown: 1 } as const;
-
-export function annualise(percent: number, period: ReturnClaim["period"]): number {
-  const n = PERIODS_PER_YEAR[period];
-  const v = (Math.pow(1 + percent / 100, n) - 1) * 100;
-  return Number.isFinite(v) ? Math.min(v, 1e9) : 1e9;
 }
 
 export function extractEntities(text: string): Entities {

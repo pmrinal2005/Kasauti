@@ -1,8 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { lookupRegistration, REGISTRY_SNAPSHOT } from "@/core/registry";
-import { annualise } from "@/core/entities";
-import { fmtPct } from "@/core/fusion";
+import { annualise, band, doublingYears, ponziCollapseMonth, fmtPct } from "@/core/plausibility";
 import { mulberry32 } from "@/lib/data";
 
 export function Registry() {
@@ -49,7 +48,11 @@ function Plausibility() {
   const [period, setPeriod] = useState<"day" | "week" | "month" | "year">("day");
   const [amt, setAmt] = useState(10000);
   const ann = annualise(pct, period);
-  const tone = ann > 30 ? "bad" : ann > 15 ? "warn" : "ok";
+  const b = band(ann);
+  const tone = b === "implausible" || b === "impossible" ? "bad" : b === "stretch" ? "warn" : "ok";
+  const dbl = doublingYears(ann);
+  const monthly = (Math.pow(1 + ann / 100, 1 / 12) - 1) * 100;
+  const collapse = tone === "bad" ? ponziCollapseMonth(monthly, 100) : null;
   const after1y = amt * (1 + Math.min(ann, 1e9) / 100);
   return (
     <article className="card">
@@ -67,6 +70,10 @@ function Plausibility() {
             ₹{amt.toLocaleString("en-IN")} would become {ann > 1e6 ? "more money than exists in India" : `₹${Math.round(after1y).toLocaleString("en-IN")}`} in one year.
             {tone === "bad" ? " No real asset sustains this — it is how Ponzi schemes advertise." : tone === "warn" ? " Possible only with high risk; never 'guaranteed'." : " Within the range of real long-run asset returns — still not guaranteed."}
           </div>
+          <dl className="kv" style={{ marginTop: 10 }}>
+            <dt>Money doubles every</dt><dd>{!Number.isFinite(dbl) ? "—" : dbl < 1 / 12 ? `${Math.max(1, Math.round(dbl * 365))} day(s)` : dbl < 1 ? `${(dbl * 12).toFixed(1)} months` : `${dbl.toFixed(1)} years`}</dd>
+            {collapse !== null && <><dt>Ponzi arithmetic</dt><dd>Paying this from new deposits, 100 investors must grow past India’s population in <b>{collapse} months</b>.</dd></>}
+          </dl>
         </div>
       </div>
     </article>

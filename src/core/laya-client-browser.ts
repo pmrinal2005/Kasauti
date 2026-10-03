@@ -65,13 +65,33 @@ export interface Tokenizer {
   sep: number;
   mask: number;
   pad: number;
+  /** literal mask token string (e.g. "<mask>") — scrubbed from all text like the reference implementation */
+  maskToken?: string;
+}
+
+/**
+ * Parity fix for transformers.js ≤3.x vs HF `tokenizers` (Rust) on Laya's mmBERT/Gemma-style tokenizer.
+ * The tokenizer.json declares Metaspace{prepend_scheme:"always"} WITHOUT `add_prefix_space`; Rust prepends
+ * "▁" whenever the scheme is "always", but transformers.js additionally requires add_prefix_space=true —
+ * so without this patch the FIRST word of every segment gets a different id (e.g. "what" 5049 vs "▁what" 1212),
+ * silently shifting every input away from what the model was trained on. Verified against Python tokenizers.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function patchTokenizerJSON(tj: any): any {
+  const fix = (p: { type?: string; prepend_scheme?: string; add_prefix_space?: boolean } | null | undefined) => {
+    if (p && p.type === "Metaspace" && p.add_prefix_space === undefined) p.add_prefix_space = (p.prepend_scheme ?? "always") !== "never";
+  };
+  fix(tj?.pre_tokenizer);
+  if (Array.isArray(tj?.pre_tokenizer?.pretokenizers)) tj.pre_tokenizer.pretokenizers.forEach(fix);
+  return tj;
 }
 
 /** Port of build_sequence(): returns input ids and per-option [MASK] marker positions. */
-export function buildSequence(tok: Tokenizer, state: string, q: Question, maxLen: number, headMaxLen: number) {
+export function buildSequence(tok: Tokenizer, state: string, q: Question, maxLen: number, headMaxLen: number, truncateLeft = false) {
+  const scrub = (t: string) => (tok.maskToken ? t.split(tok.maskToken).join(" ") : t);
   const opts = renderOptions(q);
-  let head = tok.encode(`${q.type} question: ${q.instructions}`);
-  let optIds = opts.map((o) => [tok.mask, ...tok.encode(" " + o).slice(0, 48)]);
+  let head = tok.encode(`${q.type} question: ${scrub(q.instructions)}`);
+  let optIds = opts.map((o) => [tok.mask, ...tok.encode(" " + scrub(o)).slice(0, 48)]);
   let budget = headMaxLen - optIds.reduce((s, o) => s + o.length, 0);
   if (budget < 16) {
     const per = Math.max(4, Math.floor((headMaxLen - 16) / Math.max(1, optIds.length)));
@@ -87,7 +107,8 @@ export function buildSequence(tok: Tokenizer, state: string, q: Question, maxLen
   }
   ids.push(tok.sep);
   const room = Math.max(0, maxLen - ids.length - 1);
-  ids.push(...tok.encode(state).slice(0, room), tok.sep);
+  const st = tok.encode(scrub(state));
+  ids.push(...(truncateLeft ? st.slice(-room) : st.slice(0, room)), tok.sep); // mirrors Python st[-room:] / st[:room]
   return { ids: ids.slice(0, maxLen), markers: markers.filter((m) => m < maxLen) };
 }
 

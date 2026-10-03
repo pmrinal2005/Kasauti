@@ -1,7 +1,7 @@
 "use client";
 import { Fragment, useEffect, useState } from "react";
 import { detectCapability, type Capability } from "@/lib/capability";
-import { enableDeepCheck, MODEL_BASE, runBenchmark, subscribeModel, type BenchResult, type ModelState } from "@/lib/engine";
+import { enableDeepCheck, inspectSequence, MODEL_BASE, runBenchmark, subscribeModel, type BenchResult, type InspectResult, type ModelState } from "@/lib/engine";
 import { CLAIM_V1_FOLLOWUPS, CLAIM_V1_TRIAGE, DEFAULT_MANIFEST, renderOptions } from "@/core/laya-client-browser";
 import { BarChart } from "../charts";
 import { ICpu, IDownload, IBolt } from "../icons";
@@ -14,6 +14,9 @@ export function Engine() {
   const [bench, setBench] = useState<BenchResult | null>(null);
   const [benching, setBenching] = useState(false);
   const [cacheMB, setCacheMB] = useState<number | null>(null);
+  const [probe, setProbe] = useState("Guaranteed 3% daily profit, join VIP group today");
+  const [insp, setInsp] = useState<InspectResult | null>(null);
+  const [inspBusy, setInspBusy] = useState(false);
 
   useEffect(() => { setCap(detectCapability()); return subscribeModel(setModel); }, []);
   useEffect(() => {
@@ -21,6 +24,13 @@ export function Engine() {
   }, [model?.status]);
 
   const doBench = async () => { setBenching(true); setBench(await runBenchmark()); setBenching(false); };
+  const doInspect = async () => {
+    setInspBusy(true);
+    const r = await inspectSequence(probe);
+    setInsp(r);
+    setInspBusy(false);
+    navigator.storage?.estimate?.().then((e) => setCacheMB((e.usage ?? 0) / 1048576)).catch(() => {});
+  };
   const clearCache = async () => { await caches.delete("kasauti-model-v1"); setCacheMB(0); };
 
   return (
@@ -118,6 +128,28 @@ export function Engine() {
             Design rules from Laya’s published limits: ≤20 options per choice (Banking77 collapse), option-order augmentation, <span className="mono">score</span> treated as weakest primitive, gate on <span className="mono">confidence</span> not <span className="mono">act_probability</span> (#185), and per-bucket temperature refit (ECE 0.314 → 0.106 on multilingual).
           </div>
         </article>
+      </section>
+
+      <section className="card" id="tokenizer-dry-run">
+        <div className="card-head">
+          <div><h3>Tokenizer dry-run · exact Laya input</h3><p>Fetches only the real <span className="mono">laya-multilingual</span> tokenizer (≈34 MB, cached) and builds the <span className="mono">claim_v1</span> triage sequence in the Worker — verifiable before any ONNX graph is published.</p></div>
+        </div>
+        <div className="row" style={{ flexWrap: "nowrap" }}>
+          <label htmlFor="probe" className="sr-only">Message to tokenize</label>
+          <input id="probe" className="input" value={probe} onChange={(e) => setProbe(e.target.value)} />
+          <button className="btn" onClick={doInspect} disabled={inspBusy || !probe.trim()}><ICpu />{inspBusy ? "Tokenizing…" : "Build sequence"}</button>
+        </div>
+        {insp ? (
+          <div className="grid row-2b" style={{ marginTop: 12 }}>
+            <dl className="kv">
+              <dt>Sequence length</dt><dd><b>{insp.ids}</b> / {DEFAULT_MANIFEST.maxLen} tokens</dd>
+              <dt>[MASK] option markers</dt><dd className="mono">{insp.markers.join(", ")}</dd>
+              <dt>CLS / SEP / MASK ids</dt><dd className="mono">{insp.special.cls} / {insp.special.sep} / {insp.special.mask}</dd>
+              <dt>Build time</dt><dd>{insp.ms.toFixed(1)} ms</dd>
+            </dl>
+            <div className="note mono" style={{ fontSize: 11, wordBreak: "break-all", color: "var(--text)" }}>[{insp.head.join(", ")}, …]</div>
+          </div>
+        ) : <div className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>Byte-identical to Python <span className="mono">tokenizers</span> after the Metaspace parity patch (see <span className="mono">patchTokenizerJSON</span>).</div>}
       </section>
     </>
   );

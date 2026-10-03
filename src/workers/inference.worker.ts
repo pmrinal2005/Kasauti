@@ -19,6 +19,8 @@ import {
   decode,
   DEFAULT_MANIFEST,
   optionKeys,
+  patchTokenizerJSON,
+  CLAIM_V1_TRIAGE,
   type CalibrationManifest,
   type QuestionSet,
   type Tokenizer,
@@ -29,7 +31,9 @@ declare const self: DedicatedWorkerGlobalScope;
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const dynImport = new Function("u", "return import(u)") as (u: string) => Promise<any>;
 const ORT_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
-const TOK_CDN = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.2";
+const TOK_CDN = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.1.2/dist/transformers.min.js";
+/** Tokenizer ships in the ORIGINAL Laya repo; only the ONNX graphs live in Kasauti's export repo. */
+const TOK_BASE = "https://huggingface.co/convaiinnovations/laya/resolve/main/multilingual/tokenizer";
 const CACHE = "kasauti-model-v1";
 
 let session: any = null;
@@ -82,15 +86,48 @@ async function load(base: string, backend: string, threads: number) {
     executionProviders: useGpu ? ["webgpu", "wasm"] : ["wasm"],
     graphOptimizationLevel: "all",
   });
-  const tf = await dynImport(TOK_CDN);
-  const hf = await tf.AutoTokenizer.from_pretrained(m.tokenizerRepo ?? "convaiinnovations/laya", { subfolder: m.tokenizerSubfolder ?? "multilingual/tokenizer" });
-  tok = {
-    encode: (s: string) => hf.encode(s, { add_special_tokens: false }),
-    cls: hf.cls_token_id ?? 1, sep: hf.sep_token_id ?? 1, mask: hf.mask_token_id ?? 4, pad: hf.pad_token_id ?? 0,
-  };
+  tok = await loadTokenizer(m.tokenizerBase ?? TOK_BASE);
   backendUsed = useGpu ? "webgpu" : threads > 1 ? "wasm-mt" : "wasm-st";
   (self as any).__ort = ort;
   post({ type: "status", status: "ready", detail: `${manifest.modelVersion} on ${backendUsed}`, backend: backendUsed });
+}
+
+/**
+ * Build the tokenizer from tokenizer.json + tokenizer_config.json directly (Cache API, ~34 MB once).
+ * - AutoTokenizer.from_pretrained({subfolder}) looks for the config at the repo ROOT and 404s here.
+ * - transformers.js exposes no cls_token_id; Laya's CLS is <bos> (2), SEP is <eos> (1), MASK is <mask> (4),
+ *   so ids are resolved from the config's token strings, never from guessed fallbacks.
+ * - patchTokenizerJSON() restores Rust-tokenizers parity for Metaspace prepend_scheme="always".
+ */
+async function loadTokenizer(base: string): Promise<Tokenizer> {
+  post({ type: "status", status: "downloading", detail: "Fetching Laya tokenizer (one-time, cached)…" });
+  const dec = new TextDecoder();
+  const [tjBuf, tcBuf] = await Promise.all([
+    cachedFetch(`${base}/tokenizer.json`, (l, t) => post({ type: "progress", loaded: l, total: t })),
+    cachedFetch(`${base}/tokenizer_config.json`),
+  ]);
+  const tj = patchTokenizerJSON(JSON.parse(dec.decode(tjBuf)));
+  const tc = JSON.parse(dec.decode(tcBuf));
+  const tf = await dynImport(TOK_CDN);
+  const hf = new tf.PreTrainedTokenizer(tj, tc);
+  const id = (t: string | undefined, fb: number) => (t && hf.model.tokens_to_ids.get(t)) ?? fb;
+  const t: Tokenizer = {
+    encode: (x: string) => hf.encode(x, { add_special_tokens: false }),
+    cls: id(tc.cls_token ?? tc.bos_token, 2),
+    sep: id(tc.sep_token ?? tc.eos_token, 1),
+    mask: id(tc.mask_token, 4),
+    pad: id(tc.pad_token, 0),
+    maskToken: tc.mask_token,
+  };
+  return t;
+}
+
+/** Tokenizer-only inspection: shows the exact Laya input for a message before any ONNX graph exists. */
+async function inspect(state: string) {
+  if (!tok) tok = await loadTokenizer(TOK_BASE);
+  const t0 = performance.now();
+  const s = buildSequence(tok, state, CLAIM_V1_TRIAGE, manifest.maxLen, manifest.headMaxLen);
+  return { type: "inspect", ids: s.ids.length, markers: s.markers, head: s.ids.slice(0, 40), special: { cls: tok.cls, sep: tok.sep, mask: tok.mask }, ms: performance.now() - t0 };
 }
 
 const QT: Record<string, number> = { choice: 0, score: 1, noul: 2 };
@@ -160,6 +197,7 @@ self.onmessage = async (ev: MessageEvent<any>) => {
     if (msg.type === "load") await load(msg.base, msg.backend, msg.threads);
     else if (msg.type === "predict") post({ type: "result", id: msg.id, ...(await predict(msg.state, msg.questions)) });
     else if (msg.type === "bench") post({ type: "bench", ...benchmark() });
+    else if (msg.type === "inspect") { post(await inspect(msg.state)); post({ type: "status", status: session ? "ready" : "unpublished", detail: session ? `${manifest.modelVersion} on ${backendUsed}` : "Tokenizer ready · ONNX export not published yet — Tier-0 active", backend: backendUsed }); }
   } catch (e) {
     post({ type: "status", status: "error", detail: String(e), id: msg.id });
   }

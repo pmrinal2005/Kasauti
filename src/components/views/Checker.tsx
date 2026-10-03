@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { RUNG_META, rungFromScore, type Rung, type Tier0Result } from "@/core/fusion";
+import { fuseTier1, RUNG_META, type Evidence, type Rung, type Tier0Result } from "@/core/fusion";
 import { CLAIM_V1_TRIAGE, planFollowups, type Answer } from "@/core/laya-client-browser";
-import { checkTier0, getModelState, lookupShared, predictTier1, subscribeModel, syncShared, type ModelState } from "@/lib/engine";
+import { checkTier0, getModelState, localVerdict, lookupShared, predictTier1, saveLocalVerdict, subscribeModel, syncShared, type ModelState } from "@/lib/engine";
 import { addCheck, go, set, toast, useStore } from "@/lib/store";
 import { detectCapability } from "@/lib/capability";
 import { recognitionSupported, speak, startRecognizer, stopSpeaking, type RecMode, type RecognizerHandle } from "@/core/voice";
@@ -20,6 +20,9 @@ const SAMPLES = [
 interface Outcome {
   t0: Tier0Result;
   shared: { rung: string; hits: number } | null;
+  local: { rung: string; ts: number } | null;
+  evidence: Evidence[];
+  score: number;
   t1: { triage?: Answer; followups: Record<string, Answer>; ms: number; modelVersion: string; backend: string } | null;
   finalRung: Rung;
 }
@@ -46,23 +49,26 @@ export function Checker() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
-  async function run(input = text) {
+  async function run(input = text, channel: "paste" | "voice" = "paste") {
     const s = input.trim();
     if (!s) return;
     setBusy(true); setWhy(""); stopSpeaking();
     try {
+      // 1–3: normalise, fingerprint, Tier-0 (Worker) — renders immediately
       const t0 = await checkTier0(s);
-      setOut({ t0, shared: null, t1: null, finalRung: t0.rung }); // Tier-0 renders immediately
+      // 4: on-device verdict cache (<2 ms) — a previous fused verdict for this exact text
+      const lv = localVerdict(t0.hash);
+      setOut({ t0, shared: null, local: lv ? { rung: lv.rung, ts: lv.ts } : null, evidence: t0.evidence, score: t0.score, t1: null, finalRung: t0.rung });
+      // 5–7: edge/shared cache lookup in parallel with on-device Laya (never blocks the Tier-0 render)
       const [shared, t1] = await Promise.all([lookupShared(t0.hash), runTier1(s, t0)]);
-      let finalRung = t0.rung;
-      let score = t0.score;
-      if (t1) {
-        for (const [k, a] of Object.entries(t1.followups)) if (!a.abstained && (a.noul ?? 0) > 0.7) score += k === "pay_to_withdraw" || k === "digital_arrest" ? 3 : 1.5;
-        finalRung = rungFromScore(score, Object.keys(t0.families).length + Object.values(t1.followups).filter((a) => (a.noul ?? 0) > 0.7).length);
-      }
-      setOut({ t0, shared: shared ? { rung: shared.rung, hits: shared.hits } : null, t1, finalRung });
-      addCheck({ id: t0.hash.slice(0, 12), ts: Date.now(), excerpt: s.slice(0, 140), hash: t0.hash, rung: finalRung, score, families: Object.keys(t0.families), lang: lang.slice(0, 2), channel: rec ? "voice" : "paste", tier: shared ? "cache" : t1 ? "T0+T1" : "T0", ms: Math.round(t0.elapsedMs + (t1?.ms ?? 0)), local: true });
-      syncShared(t0, t1?.modelVersion ?? "tier0-only");
+      // 8: transparent evidence fusion (pure, unit-tested in core/fusion)
+      const fused = fuseTier1(t0, t1?.triage ?? null, t1?.followups ?? {});
+      setOut({ t0, shared: shared ? { rung: shared.rung, hits: shared.hits } : null, local: lv ? { rung: lv.rung, ts: lv.ts } : null, evidence: fused.evidence, score: fused.score, t1, finalRung: fused.rung });
+      const modelVersion = t1?.modelVersion ?? "tier0-only";
+      addCheck({ id: t0.hash.slice(0, 12), ts: Date.now(), excerpt: s.slice(0, 140), hash: t0.hash, rung: fused.rung, score: fused.score, families: Object.keys(t0.families), lang: lang.slice(0, 2), channel, tier: shared ? "cache" : fused.tier, ms: Math.round(t0.elapsedMs + (t1?.ms ?? 0)), local: true });
+      saveLocalVerdict(t0.hash, { rung: fused.rung, score: fused.score, tier: fused.tier, modelVersion, ts: Date.now() });
+      // 9: non-blocking sync of hash + codes only (never raw text) so future visitors get a cache hit
+      syncShared(t0, modelVersion, { rung: fused.rung, codes: fused.evidence.map((e) => e.code) });
     } catch (e) {
       toast(`Check failed: ${String(e)}`);
     } finally {
@@ -91,7 +97,7 @@ export function Checker() {
     const h = startRecognizer({
       lang,
       onInterim: (t) => setText(t),
-      onFinal: (t) => { setText(t); void run(t); },
+      onFinal: (t) => { setText(t); void run(t, "voice"); },
       onMode: setRecMode,
       onError: (e) => { toast(e === "not-allowed" ? "Microphone blocked — please type instead" : `Voice error: ${e}`); setRec(null); },
       onEnd: () => setRec(null),
@@ -104,7 +110,7 @@ export function Checker() {
     if (!out) return;
     setWhyBusy(true); setWhy("");
     try {
-      const r = await fetch("/api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, codes: out.t0.evidence.map((e) => e.code), lang }) });
+      const r = await fetch("/api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, codes: out.evidence.map((e) => e.code), lang }) });
       const reader = r.body!.getReader();
       const dec = new TextDecoder();
       let acc = "";
@@ -154,10 +160,11 @@ export function Checker() {
             <div className="stack">
               <div className={`verdict-banner ${m!.tone}`}>
                 {m!.tone === "ok" ? <ICheck width={26} /> : <IAlert width={26} />}
-                <div><h4>{m!.label}</h4><div className="muted" style={{ fontSize: 12 }}>Score {out.t0.score.toFixed(1)} · heuristic agreement {(out.t0.confidence * 100).toFixed(0)}% · {out.t0.elapsedMs.toFixed(1)} ms on-device</div></div>
+                <div><h4>{m!.label}</h4><div className="muted" style={{ fontSize: 12 }}>Score {out.score.toFixed(1)} · heuristic agreement {(out.t0.confidence * 100).toFixed(0)}% · {out.t0.elapsedMs.toFixed(1)} ms on-device</div></div>
               </div>
               <div className="ladder">{(["safe_pattern", "unclear", "caution", "likely_scam", "known_scam"] as Rung[]).map((r) => <div key={r} className={`rung ${RUNG_META[r].step <= m!.step ? "on " + m!.tone : ""}`} />)}</div>
               <div className="rung-labels"><span>Safe</span><span>Unclear</span><span>Caution</span><span>Likely</span><span>Known</span></div>
+              {out.local && <div className="note">Checked on this device before ({new Date(out.local.ts).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}) — previous verdict: {RUNG_META[out.local.rung as Rung]?.label ?? out.local.rung}.</div>}
               {out.shared && <div className="note">Shared cache: this exact text was seen <b>{out.shared.hits}×</b> before (verdict: {out.shared.rung.replace("_", " ")}).</div>}
               {out.t1 && (
                 <div className="note">
@@ -179,10 +186,10 @@ export function Checker() {
       {out && (
         <section className="grid row-2b">
           <article className="card">
-            <div className="card-head"><div><h3>How we know</h3><p>Every signal, its weight and its source.</p></div><span className="chip neutral">{out.t0.evidence.length} signals</span></div>
+            <div className="card-head"><div><h3>How we know</h3><p>Every signal, its weight and its source.</p></div><span className="chip neutral">{out.evidence.length} signals</span></div>
             <div className="stack" style={{ gap: 8 }}>
-              {out.t0.evidence.length === 0 && <div className="empty">No deterministic scam signals. Absence of evidence is not proof of safety.</div>}
-              {out.t0.evidence.map((e, i) => (
+              {out.evidence.length === 0 && <div className="empty">No deterministic scam signals. Absence of evidence is not proof of safety.</div>}
+              {out.evidence.map((e, i) => (
                 <div className="evidence" key={i}>
                   <span className="w" style={{ color: e.weight > 0 ? "var(--bad)" : "var(--ok)" }}>{e.weight > 0 ? "+" : ""}{e.weight.toFixed(1)}</span>
                   <div style={{ minWidth: 0 }}><b style={{ fontSize: 13 }}>{e.label}</b> <span className="chip neutral" style={{ marginLeft: 4 }}>{e.source}</span><div className="muted" style={{ fontSize: 12.5 }}>{e.detail}</div></div>

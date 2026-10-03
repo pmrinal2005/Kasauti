@@ -54,6 +54,13 @@ export interface BenchResult {
   medianMs: number;
   projectedMs: { q1: number; q3: number; q4: number };
 }
+export interface InspectResult {
+  ids: number;
+  markers: number[];
+  head: number[];
+  special: { cls: number; sep: number; mask: number };
+  ms: number;
+}
 
 type Listener = (s: ModelState) => void;
 let infWorker: Worker | null = null;
@@ -61,6 +68,7 @@ let modelState: ModelState = { status: "idle", detail: "Deep checking not enable
 const listeners = new Set<Listener>();
 const predWaiters = new Map<number, (r: { answers: Record<string, Answer>; ms: number; modelVersion: string; backend: string } | null) => void>();
 let benchWaiter: ((b: BenchResult) => void) | null = null;
+let inspectWaiter: ((r: InspectResult | null) => void) | null = null;
 
 function setState(s: Partial<ModelState>) {
   modelState = { ...modelState, ...s };
@@ -83,9 +91,11 @@ function inference() {
       if (m.type === "status") {
         setState({ status: m.status, detail: m.detail, backend: m.backend });
         if (m.id) { predWaiters.get(m.id)?.(null); predWaiters.delete(m.id); }
+        if (m.status === "error" && inspectWaiter) { inspectWaiter(null); inspectWaiter = null; }
       } else if (m.type === "progress") setState({ status: "downloading", progress: m.total ? m.loaded / m.total : 0, detail: `${(m.loaded / 1048576).toFixed(1)} MB downloaded` });
       else if (m.type === "result") { predWaiters.get(m.id)?.(m); predWaiters.delete(m.id); }
       else if (m.type === "bench") { benchWaiter?.(m); benchWaiter = null; }
+      else if (m.type === "inspect") { inspectWaiter?.(m); inspectWaiter = null; }
     };
     infWorker.onerror = (e) => setState({ status: "error", detail: e.message || "Worker failed to start — Tier-0 only" });
   }
@@ -114,6 +124,30 @@ export function runBenchmark(): Promise<BenchResult> {
   });
 }
 
+/** Tokenizer-only dry run: downloads just the Laya tokenizer (~34 MB, cached) and returns the exact model input. */
+export function inspectSequence(state: string): Promise<InspectResult | null> {
+  return new Promise((res) => {
+    inspectWaiter = res;
+    inference().postMessage({ type: "inspect", state });
+  });
+}
+
+/* ------------------------------ local verdict cache ------------------------------ */
+// Step 4 of the data flow: an on-device hash → fused-verdict map (<2 ms), checked before the network.
+const LV_KEY = "kasauti.verdicts.v1";
+export interface LocalVerdict { rung: string; score: number; tier: string; modelVersion: string; ts: number }
+function lvLoad(): Record<string, LocalVerdict> { try { return JSON.parse(localStorage.getItem(LV_KEY) || "{}"); } catch { return {}; } }
+export function localVerdict(hash: string): LocalVerdict | null { return lvLoad()[hash] ?? null; }
+export function saveLocalVerdict(hash: string, v: LocalVerdict) {
+  try {
+    const all = lvLoad();
+    all[hash] = v;
+    const keys = Object.keys(all);
+    if (keys.length > 500) keys.sort((a, b) => all[a].ts - all[b].ts).slice(0, keys.length - 500).forEach((k) => delete all[k]);
+    localStorage.setItem(LV_KEY, JSON.stringify(all));
+  } catch { /* quota / private mode */ }
+}
+
 /* ------------------------------ shared verdict cache ------------------------------ */
 
 export async function lookupShared(hash: string): Promise<{ rung: string; codes: string[]; hits: number } | null> {
@@ -126,8 +160,8 @@ export async function lookupShared(hash: string): Promise<{ rung: string; codes:
   }
 }
 
-export function syncShared(t: Tier0Result, modelVersion: string) {
+export function syncShared(t: Tier0Result, modelVersion: string, fused?: { rung: string; codes: string[] }) {
   // non-blocking; compact codes only — NEVER raw text
-  const body = JSON.stringify({ simhash: t.simhash, rung: t.rung, codes: t.evidence.map((e) => e.code), modelVersion });
+  const body = JSON.stringify({ simhash: t.simhash, rung: fused?.rung ?? t.rung, codes: fused?.codes ?? t.evidence.map((e) => e.code), modelVersion });
   fetch(`/api/v/${t.hash}`, { method: "POST", headers: { "content-type": "application/json" }, body, keepalive: true }).catch(() => {});
 }
