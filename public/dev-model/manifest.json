@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "modelVersion": "kasauti-laya-tiny-dev@f0a94c10",
+  "modelVersion": "kasauti-laya-tiny-dev@cd7122ce",
   "maxLen": 192,
   "headMaxLen": 64,
   "qtypes": {
@@ -9,43 +9,43 @@
     "noul": 2
   },
   "temperature": [
-    5.0,
+    1.0091962814331055,
     1.0,
-    1.3224718570709229
+    2.1737582683563232
   ],
   "temperatureByBucket": {
-    "choice:3-5": 5.0,
+    "choice:3-5": 0.9999373555183411,
     "choice:6-10": 5.0,
-    "noul:2": 1.3224718570709229
+    "noul:2": 2.1737582683563232
   },
   "abstain": {
     "choice:3-5": 1.0,
     "choice:6-10": 1.0,
     "default": 1.0,
-    "noul:2": 0.7865
+    "noul:2": 0.7638
   },
   "files": {
     "wasm": {
       "path": "kasauti-laya-int8.onnx",
-      "bytes": 578989,
-      "sha256": "f0a94c1017859157c0aba51fe99557bd47bca26576759c3f11e7ebb6b687d4b4"
+      "bytes": 578285,
+      "sha256": "cd7122ce8d89051d2cc934f10eaafc428cc2427d535c6774c1be858746b247cc"
     },
     "webgpu": {
       "path": "kasauti-laya-q4.onnx",
-      "bytes": 1488446,
-      "sha256": "ffb2bbf3e3a8602b189a6221099dd74a0e8a3096fd80a23a5f4e968c503577b9"
+      "bytes": 1485629,
+      "sha256": "87841f41f06af35564aad58a58bb953aae0da0e15c6c34e73b33d1f5aca94de4"
     },
     "fp32": {
       "path": "kasauti-laya-fp32.onnx",
-      "bytes": 1997795,
-      "sha256": "95e86941b9c5b1a69f25856dafc128e87653299a849ca9693ed0a5ab669d1c95"
+      "bytes": 1994978,
+      "sha256": "d7133532d271b02891de4eb96a1ab42c89f7b16929926798b9b3706ccbc363de"
     }
   },
   "tokenizer": {
     "path": "tokenizer.json",
-    "bytes": 175523,
-    "sha256": "42ae90038e38a35fea2552f8dabae08dba8afde64f2e62cdccd34356b094ba07",
-    "vocab": 4685,
+    "bytes": 174978,
+    "sha256": "ed98bd10d4cafdbd5f9f87eff6a5cda2b4dd82242c7c7037b8ce1e5e22cac4a3",
+    "vocab": 4674,
     "pruned": true,
     "specials": {
       "mask": 4,
@@ -57,26 +57,35 @@
   },
   "parity": {
     "path": "parity.json",
-    "bytes": 6183,
-    "sha256": "c85fbc56b6c5cb2e07349e2104a87ff55903209d57f44723c082455332d08103"
+    "bytes": 6547,
+    "sha256": "23ff90a95fcecb15f9013871d1b39c2bd8b88863cae17cf4f3fa1fac49f59e88"
   },
   "evals": {
-    "accuracy": 0.4784,
-    "ece": 0.1191,
-    "int8Agreement": 1.0,
-    "q4Agreement": 1.0,
+    "accuracy": 0.4537,
+    "ece": 0.0723,
+    "int8Agreement": 0.9792,
+    "q4Agreement": 0.9792,
     "dataset": "kasauti-synthetic-1.0.0"
   },
   "profile": "smoke",
-  "createdUtc": "2026-10-03T17:09:48Z",
+  "createdUtc": "2026-10-03T18:45:16Z",
+  "base": {
+    "modelId": null,
+    "subfolder": null,
+    "revisionRequested": null,
+    "revisionResolved": null,
+    "pinned": false,
+    "onlySubfolderFiles": false,
+    "kind": "tiny-synthetic"
+  },
   "reportOnly": true,
   "banks": {
     "version": "1.0.0",
     "sha256": "cf02415d58f97f563a999960643dc27c3a1046e7b670bcdd53690d9da9a192ee"
   },
   "vocabPruning": {
-    "before": 4744,
-    "after": 4685,
+    "before": 4733,
+    "after": 4674,
     "drift": 0
   },
   "graphIO": {

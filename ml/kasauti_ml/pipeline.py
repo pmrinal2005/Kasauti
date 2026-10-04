@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import random
+import shutil
 import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -55,6 +56,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.ArgumentParser:
                    help="checkpoint subfolder: multilingual (100+ languages) is what Kasauti ships")
     p.add_argument("--model-dir", default=None, help="local checkpoint dir (skips the Hub download)")
     p.add_argument("--resume-from", default=None, help="start from an already fine-tuned dir")
+    p.add_argument("--revision", default=None,
+                   help="Hub revision (commit SHA / tag) to train from; default: the reviewed pin "
+                        "laya.revisions.PINNED_REVISIONS carries for --model-id")
+    p.add_argument("--no-pin-base", dest="pin_base", action="store_false", default=True,
+                   help="train from the Hub default branch instead of the reviewed pin "
+                        "(not reproducible — the manifest records that it was not)")
+    p.add_argument("--all-files", dest="only_subfolder", action="store_false", default=True,
+                   help="download every file in the repo (~2.5 GB) instead of just --subfolder (~680 MB)")
+    p.add_argument("--max-tokenizer-drift", type=float, default=0.005,
+                   help="fail the export when the pruned tokenizer reassembles more than this "
+                        "fraction of the corpus differently (default 0.5%%)")
+    p.add_argument("--allow-tokenizer-drift", action="store_true",
+                   help="ship even when the drift gate fails (recorded in the manifest)")
+    p.add_argument("--reference-check", action="store_true",
+                   help="after staging, cross-check the export against the installed `laya` "
+                        "reference client (mirrors / calibration / ONNXAgent answers)")
+    p.add_argument("--allow-reference-check-skip", action="store_true",
+                   help="do not fail the run when `laya` is missing for --reference-check")
     p.add_argument("--variants", type=int, default=None, help="surface variants per template")
     # None = "let the profile decide"; an explicit flag always wins (see PROFILES below)
     p.add_argument("--epochs", type=int, default=None)
@@ -109,6 +128,80 @@ def apply_profile_defaults(args: Any) -> None:
     for key, val in prof.items():
         if getattr(args, key, None) is None:
             setattr(args, key, val)
+
+
+def _resolve_base_revision(model_id: str, requested: Optional[str], pin: bool) -> Optional[str]:
+    """The Hub revision the fine-tune starts from.
+
+    `convaiinnovations/laya` is a live repository — its root `config.json` was added after the
+    commit Laya's own `PINNED_REVISIONS` names — so "download whatever main is today" makes the
+    exported model unreproducible from its own manifest: the same command, run a month later,
+    silently fine-tunes a different base. Laya ships the pin for exactly this reason, and this
+    resolves it the same way the reference does (`resolve_revision(mid, "reviewed")`), with a local
+    fallback so the pipeline stays runnable without `laya` installed.
+    """
+    if not pin:
+        return requested
+    try:
+        from laya.revisions import PINNED_REVISIONS, resolve_revision
+
+        return resolve_revision(model_id, requested or "reviewed")
+    except Exception:
+        pass
+    if requested:
+        return requested
+    try:  # `laya` not installed: use its published table rather than the moving branch
+        _PINNED = {"convaiinnovations/laya": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851"}
+        return _PINNED.get(model_id.lower()) or _PINNED.get(model_id)
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _download_base(args: Any) -> Tuple[str, Dict[str, Any]]:
+    """Download the checkpoint the fine-tune starts from: pinned, minimal, and with provenance.
+
+    Two things the reference implementation does that a fine-tune must not skip:
+
+    * **Pin the revision** (see `_resolve_base_revision`).
+    * **Fetch only the subfolder.** The repo bundles all three checkpoints (~2.5 GB); with
+      ``--subfolder multilingual`` the fine-tune needs five files (~680 MB). Laya's own
+      `ONNXAgent` narrows ``allow_patterns`` to the subfolder for the same reason.
+    """
+    from huggingface_hub import snapshot_download
+
+    revision = _resolve_base_revision(args.model_id, args.revision, args.pin_base)
+    prefix = f"{args.subfolder}/" if args.subfolder else ""
+    patterns = ([prefix + "*"] if args.subfolder and args.only_subfolder else None)
+    log(f"downloading {args.model_id} (subfolder={args.subfolder or '-'}, "
+        f"revision={revision or 'DEFAULT BRANCH'}{', subfolder files only' if patterns else ''})…")
+    path = snapshot_download(args.model_id, revision=revision, allow_patterns=patterns)
+    if args.subfolder:
+        sub = os.path.join(path, args.subfolder)
+        if os.path.isdir(sub):
+            path = sub
+    provenance: Dict[str, Any] = {
+        "modelId": args.model_id,
+        "subfolder": args.subfolder or None,
+        "revisionRequested": revision,
+        "pinned": bool(args.pin_base and revision),
+        "onlySubfolderFiles": bool(patterns),
+    }
+    try:  # the commit the snapshot actually resolved to (None for a plain directory)
+        from laya.revisions import snapshot_revision
+
+        provenance["revisionResolved"] = snapshot_revision(path)
+    except Exception:
+        provenance["revisionResolved"] = None
+    try:  # honours LAYA_SHA256_DIGESTS; a no-op when that variable is unset
+        from laya.revisions import verify_digests
+
+        verify_digests(path)
+        provenance["digestsVerified"] = True
+    except Exception as e:
+        provenance["digestsVerified"] = False
+        provenance["digestError"] = str(e)[:200]
+        raise SystemExit(f"base checkpoint failed digest verification: {e}")
+    return path, provenance
 
 
 def pick_device(explicit: Optional[str] = None) -> str:
@@ -207,6 +300,9 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {"max_len": args.max_len, "head_max_len": args.head_max_len,
                            "head_layers": 2, "act_costs": {"escalate": 1.0}}
     ckpt_dir = args.resume_from or args.model_dir
+    base: Dict[str, Any] = {"modelId": None, "subfolder": None, "revisionRequested": None,
+                            "revisionResolved": None, "pinned": False,
+                            "onlySubfolderFiles": False, "kind": "tiny-synthetic"}
     if profile == "smoke":
         tok_json = os.path.join(args.out, "tokenizer_full.json")
         tmeta = build_tiny_tokenizer([r["state"] for r in rows], tok_json)
@@ -218,15 +314,31 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             f"tiny model: {sum(p.numel() for p in model.parameters())/1e3:.1f}k params")
     else:
         if not ckpt_dir:
-            from huggingface_hub import snapshot_download
             from laya.agent import _fix_tokenizer_config
 
-            log(f"downloading {args.model_id} (subfolder={args.subfolder})…")
-            ckpt_dir = snapshot_download(args.model_id, allow_patterns=None)
-            sub = os.path.join(ckpt_dir, args.subfolder)
-            if os.path.isdir(sub):
-                ckpt_dir = sub
+            ckpt_dir, base = _download_base(args)
+            base["kind"] = "hub-snapshot"
             _fix_tokenizer_config(ckpt_dir)
+        else:
+            base = {"modelId": args.model_id, "subfolder": args.subfolder,
+                    "revisionRequested": None, "revisionResolved": None, "pinned": False,
+                    "onlySubfolderFiles": False, "kind": "local-dir", "path": ckpt_dir}
+            try:
+                from laya.revisions import snapshot_revision
+
+                base["revisionResolved"] = snapshot_revision(ckpt_dir)
+            except Exception:
+                pass
+            if not args.resume_from:  # a resume dir is a previous *Kasauti* export, not the base
+                try:
+                    from laya.agent import _fix_tokenizer_config
+
+                    _fix_tokenizer_config(ckpt_dir)
+                except Exception as e:
+                    log(f"tokenizer-config repair skipped: {type(e).__name__}: {e}")
+        log(f"base: {base['kind']} {base.get('modelId') or base.get('path')} "
+            f"revision={base.get('revisionResolved') or base.get('revisionRequested') or '-'} "
+            f"pinned={'yes' if base.get('pinned') else 'no'}")
         with open(os.path.join(ckpt_dir, "rl_agent_config.json")) as f:
             run_cfg = json.load(f)
         cfg.update({k: v for k, v in run_cfg.items() if k in ("max_len", "head_max_len", "head_layers",
@@ -336,8 +448,22 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                                         corpus, exp_dir)
     log(f"vocab pruned {prune_stats['vocab_before']} → {prune_stats['vocab_after']} "
         f"(drift={prune_stats['segmentation_drift']}/{prune_stats['texts']})")
+    # A pruned tokenizer that reassembles text differently from the one the model was trained with
+    # silently degrades every prediction for the affected inputs — there is no error, just worse
+    # answers. With the complete merge closure (see `export._merge_parts`) this is 0 on both the
+    # synthetic and the real multilingual tokenizer, so the gate exists to catch a regression, not
+    # to be routinely overridden.
+    drift_rate = prune_stats["segmentation_drift"] / max(1, prune_stats["texts"])
     if prune_stats["segmentation_drift"]:
-        log("WARNING: pruned tokenizer segments the corpus differently — widening the corpus is safer")
+        log(f"WARNING: pruned tokenizer segments {prune_stats['segmentation_drift']}/"
+            f"{prune_stats['texts']} corpus texts differently ({drift_rate:.3%})")
+    if drift_rate > args.max_tokenizer_drift:
+        if not args.allow_tokenizer_drift:
+            log(f"GATE FAILED: tokenizer drift {drift_rate:.3%} > {args.max_tokenizer_drift:.3%} "
+                f"— the graph and the tokenizer would disagree at inference. Widen the corpus "
+                f"(more --variants) or pass --allow-tokenizer-drift to ship anyway.")
+            raise SystemExit(5)
+        log("tokenizer drift gate overridden by --allow-tokenizer-drift (recorded in the manifest)")
     tok_pruned = FastTokenizerAdapter(_rust_tok(os.path.join(exp_dir, "tokenizer.json")))
 
     # 2. gather embedding rows into the pruned order, then export fp32
@@ -431,6 +557,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                "q4Agreement": agree_q4.get("top1_agreement"),
                "dataset": f"kasauti-synthetic-{os.environ.get('KASAUTI_DATA_VERSION', '1.0.0')}"},
         extras={"profile": profile, "createdUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                # Which checkpoint bytes this model was fine-tuned from, and whether that base was
+                # a reviewed pin or a moving branch: the first question anyone asks when two
+                # exports of "the same" model disagree.
+                "base": base,
                 # Honesty switch. The browser turns `reportOnly` into "abstain on everything", so an
                 # export that did not clear the eval gates (or a smoke/dev export, whose gates are
                 # advisory) can never move the verdict — it can only be inspected.
@@ -457,6 +587,38 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         raise SystemExit("staged artifacts failed verification: " + "; ".join(problems))
     log(f"staged {len(manifest['files'])} artifacts in {staged_dir} (all sha256 verified)")
 
+    # ---------------------------------------------------------------- reference check
+    # Runs on the *staged bytes*, before anything is published: if the reference Laya client and
+    # this export disagree about the same graph, nobody should be able to download it under
+    # Kasauti's name. `laya` missing is a skip (CI without the extra), not a pass — it is reported
+    # as skipped either way so the summary never implies a check that did not run.
+    reference: Dict[str, Any] = {"ran": False}
+    if args.reference_check:
+        from . import reference_check as refcheck
+
+        ref_out = os.path.join(args.out, "reference_check.json")
+        argv = ["--staging", staged_dir, "--banks", args.banks, "--out", ref_out, "--report-only"]
+        if profile != "smoke" and ckpt_dir:
+            # the base checkpoint carries the tokenizer_config.json / encoder/ the scratch agent
+            # dir wants; the smoke profile has no such directory
+            argv += ["--checkpoint-dir", ckpt_dir]
+        code = refcheck.main(argv)
+        reference = {"ran": True, "exit": code, "report": ref_out}
+        if os.path.exists(ref_out):
+            with open(ref_out, "r", encoding="utf-8") as f:
+                passed = bool(json.load(f).get("passed"))
+            reference["passed"] = passed
+            if code == 2:
+                log("reference check SKIPPED: the `laya` package is not importable")
+            elif passed:
+                # travels with the model so an auditor can see it was checked, and by what
+                shutil.copyfile(ref_out, os.path.join(staged_dir, "reference_check.json"))
+                log("reference check passed (mirrors + calibration + reference client + evals)")
+            else:
+                log("reference check FAILED — refusing to publish")
+                if not args.allow_reference_check_skip:
+                    raise SystemExit(4)
+
     published: Dict[str, Any] = {"staging": staged_dir, "modelVersion": model_version}
     if args.public_dir:
         publish.publish_local(staged_dir, args.public_dir)
@@ -472,7 +634,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             print("\n" + publish.print_next_steps(res["url"], manifest))
 
     summary = {
-        "profile": profile, "device": device, "modelVersion": model_version,
+        "profile": profile, "device": device, "modelVersion": model_version, "base": base,
         "seconds": round(time.time() - t_start, 1), "rows": stats["rows"],
         "vocab": {"before": prune_stats["vocab_before"], "after": prune_stats["vocab_after"]},
         "sizes_mb": {"fp32": round(os.path.getsize(fp32_path) / 1e6, 1),

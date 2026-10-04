@@ -58,6 +58,23 @@ export interface ModelState {
   banksMismatch: string | null;
   tokenizer: { vocabSize: number; kind: string; specials: Record<string, number>; bytes: number } | null;
   graph: { path: string; bytes?: number; sha256?: string } | null;
+  /** the worker's replay of the published parity vectors on this device (null until it has run) */
+  selfTest: ModelSelfTest | null;
+}
+
+/**
+ * What the Worker measured *on this device* by replaying the export's parity vectors: `ok: false`
+ * means the graph drifted past the published tolerance and the runtime demoted itself to
+ * report-only; `ok: null` means the export carried no vectors (an older manifest), not a failure.
+ */
+export interface ModelSelfTest {
+  ok: boolean | null;
+  detail: string;
+  vectors?: number;
+  maxDelta?: number;
+  tolerance?: number;
+  top1?: number;
+  tokenizerMismatches?: number;
 }
 
 /** Cache name the worker writes model bytes into; the Engine view shows and clears it. */
@@ -89,6 +106,7 @@ let modelState: ModelState = {
   banksMismatch: null,
   tokenizer: null,
   graph: null,
+  selfTest: null,
 };
 const listeners = new Set<Listener>();
 export interface Tier1Result {
@@ -144,6 +162,7 @@ function inference() {
           backend: m.backend as string,
           tokenizer: m.tokenizer ?? null,
           graph: m.graph ?? null,
+          selfTest: (m.selfTest as ModelSelfTest | undefined) ?? null,
         });
       else if (m.type === "result") { predWaiters.get(m.id)?.(m); predWaiters.delete(m.id); }
       else if (m.type === "bench") { benchWaiter?.(m); benchWaiter = null; }

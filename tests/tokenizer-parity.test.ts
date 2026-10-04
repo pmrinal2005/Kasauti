@@ -10,7 +10,8 @@
  * library from the real Laya multilingual checkpoint (`ml/scripts/make_tokenizer_fixture.py`).
  * It is exact: every id, every text, no tolerance. Regenerate the fixture after changing the port:
  *
- *     python -m ml.scripts.make_tokenizer_fixture --repo convaiinnovations/laya-multilingual
+ *     python -m ml.scripts.make_tokenizer_fixture --repo convaiinnovations/laya \
+ *         --subfolder multilingual/tokenizer
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

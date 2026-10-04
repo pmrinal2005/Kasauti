@@ -185,7 +185,8 @@ can never move a verdict. A real, gate-passing `--profile kaggle` export does no
 ```bash
 python -m ml.scripts.gen_banks_ts          # src/lib/banks.ts      (+ --check for CI)
 python -m ml.scripts.gen_notebook          # notebooks/*.ipynb     (+ --check for CI)
-python -m ml.scripts.make_tokenizer_fixture --repo convaiinnovations/laya-multilingual
+python -m ml.scripts.make_tokenizer_fixture --repo convaiinnovations/laya \
+    --subfolder multilingual/tokenizer
                                            # tests/fixtures/laya-tokenizer.* (tokenizer parity gate)
 ```
 

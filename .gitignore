@@ -12,3 +12,6 @@ ml/out/
 ml/**/__pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# notebook step-10 publish copy (created by the Kaggle run)
+out-export/

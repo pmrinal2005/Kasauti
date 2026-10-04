@@ -11,7 +11,8 @@
     "check": "npm run typecheck && npm test && npm run build",
     "test:one": "node --import ./tests/resolve-ts.mjs --test",
     "banks": "python3 -m ml.scripts.gen_banks_ts",
-    "e2e": "node tests/e2e-devmode.mjs"
+    "e2e": "node tests/e2e-devmode.mjs",
+    "check:py": "python3 -m ml.scripts.gen_banks_ts --check && python3 -m ml.scripts.gen_notebook --check && python3 tests/test_reference_parity.py"
   },
   "dependencies": {
     "next": "^16.3.8",

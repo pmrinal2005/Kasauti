@@ -110,8 +110,9 @@ def print_next_steps(base_url: str, manifest: Dict[str, Any]) -> str:
         "# 1. point the app at the published model repo (Vercel env var, then redeploy)\n"
         f"NEXT_PUBLIC_LAYA_MODEL_BASE={base_url}\n\n"
         "# 2. verify locally before deploying\n"
-        "npm run typecheck && npm test && npm run build && npm start\n"
-        "node tests/e2e.mjs http://localhost:3000   # asserts the Worker loads the model\n\n"
+        "npm run typecheck && npm test && npm run build\n"
+        "NEXT_PUBLIC_LAYA_MODEL_BASE=$PWD/public/dev-model npm start   # or `npm run dev`\n"
+        "node tests/e2e-devmode.mjs http://localhost:3000   # asserts the Worker loads the model\n\n"
         f"# model version: {manifest.get('modelVersion')}\n"
         f"# evals: {json.dumps(manifest.get('evals', {}))[:200]}\n"
     )

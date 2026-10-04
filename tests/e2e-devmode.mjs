@@ -76,6 +76,14 @@ try {
   const panel = await page.evaluate(() => document.body.innerText);
   check("model version is the dev export", /kasauti-laya-(tiny-dev|multilingual)@/.test(panel));
   check("flagged uncalibrated (report-only)", /uncalibrated|report-only/i.test(panel), "dev model must never act");
+  // the Worker replays the published parity vectors on this device before it will act: the graph
+  // must reproduce the fp32 reference inside the manifest's tolerance, and the pure-TS tokenizer
+  // must reproduce the Rust ids. If either fails the export is demoted to report-only.
+  check(
+    "parity self-test ran on this device",
+    /replayed \d+ logits \+ \d+ tokenizer vectors on this device/.test(panel),
+    (panel.match(/replayed[^·\n]*/) ?? ["not reported"])[0].trim(),
+  );
 
   step("tokenizer inspection: exact model input for a real message");
   await page.locator("#probe").fill("Guaranteed 3% daily profit, join VIP group today only");

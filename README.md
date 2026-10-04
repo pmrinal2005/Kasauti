@@ -67,7 +67,7 @@ There is deliberately **no `/api/asr`**. `/api/ivr` is the *only* route that can
   "banks": { "version": "1.0.0", "sha256": "…" },
   "evals": { "accuracy": 0.0, "ece": 0.0, "int8Agreement": 0.0 } }
 ```
-Graph I/O matches `DecisionModel.forward`: inputs `input_ids, attention_mask` (int64 `[B,L]`), `marker_pos` (int64 `[B,K]`), `marker_mask` (bool `[B,K]`), `qtype` (int64 `[B]`) → outputs `logits` `[B,K]` (+ `act_logits`, never gated on). Every artifact's `sha256` is verified before use and again on every cache hit; a mismatch between the manifest's `banks.sha256` and the compiled-in `BANKS_SHA256` is shown in the UI as *question-bank drift*.
+Graph I/O matches `DecisionModel.forward`: inputs `input_ids, attention_mask` (int64 `[B,L]`), `marker_pos` (int64 `[B,K]`), `marker_mask` (bool `[B,K]`), `qtype` (int64 `[B]`) → outputs `logits` `[B,K]` (+ `act_logits`, never gated on). Every artifact's `sha256` is verified before use and again on every cache hit, and once the session is up the Worker **replays the published parity vectors on the device** — a graph that drifts past the manifest's tolerance is demoted to report-only rather than quietly answering; a mismatch between the manifest's `banks.sha256` and the compiled-in `BANKS_SHA256` is shown in the UI as *question-bank drift*.
 
 ## Laya facts the design depends on (from the model card and `rl_common.py`)
 - It doesn't generate text. It answers `choice` / `score` / `noul` questions, scoring each option at its own `[MASK]` marker. In `laya-multilingual`, CLS is `<bos>`=2, SEP is `<eos>`=1 and MASK is `<mask>`=4.
@@ -78,13 +78,15 @@ Graph I/O matches `DecisionModel.forward`: inputs `input_ids, attention_mask` (i
 ## Run locally
 ```bash
 npm install
-npm test                      # 40 tests: core, tokenizer parity, manifest/calibration/gating
+npm test                      # 68 tests: core, tokenizer parity, manifest/calibration/gating
 npm run typecheck
 npm run build && npm start    # http://localhost:3000/dashboard
 
-# ML side (CPU only, ~20 s — validates the whole export chain on a tiny model)
+# ML side (CPU only, ~75 s — validates the whole export chain on a tiny model)
 python -m ml.scripts.gen_banks_ts                  # regenerate src/lib/banks.ts from ml/banks.json
-python -m ml.kasauti_ml.pipeline --profile smoke --out ml/out/dev --public-dir public/dev-model
+python -m ml.kasauti_ml.pipeline --profile smoke --out ml/out/dev --public-dir public/dev-model --reference-check
+python tests/test_reference_parity.py              # our mirrors vs the installed `laya` package
+                                                   # add KASAUTI_TOKENIZER=<real tokenizer.json> for the 256k one
 
 # browser E2E against that dev model (real ONNX inference in a Worker)
 NEXT_PUBLIC_LAYA_MODEL_BASE=/dev-model npm run dev

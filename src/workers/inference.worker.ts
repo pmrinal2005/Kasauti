@@ -20,6 +20,9 @@
  * Rules this worker enforces so a wrong answer is impossible to *ship* without noticing:
  *   * every downloaded artifact is sha256-verified against the manifest (and again on cache hit)
  *   * the tokenizer's own special ids must match the manifest's, or we refuse to run
+ *   * after the session is up, the published parity vectors are replayed on this device: the graph
+ *     must reproduce the fp32 reference inside the published tolerance, or the export is demoted to
+ *     report-only (a mis-compiling backend must never quietly answer questions)
  *   * the banks sha256 must match the generated `src/lib/banks.ts`, or we warn loudly: that
  *     mismatch means the model was trained on different question wording than the runtime asks
  *   * an uncalibrated manifest can never trigger an action — thresholds are forced to abstain
@@ -51,6 +54,22 @@ let tok: LayaTokenizer | null = null;
 let manifest: CalibrationManifest = parseManifest(null);
 let backendUsed = "none";
 let banksMismatch: string | null = null;
+let selfTest: SelfTest | null = null;
+
+/**
+ * Result of replaying the published parity vectors through the graph this device built.
+ *
+ * `ok: null` means "not testable" (an older export without vectors) — never a failure.
+ */
+interface SelfTest {
+  ok: boolean | null;
+  detail: string;
+  vectors?: number;
+  maxDelta?: number;
+  tolerance?: number;
+  top1?: number;
+  tokenizerMismatches?: number;
+}
 
 const post = (m: unknown) => self.postMessage(m);
 
@@ -104,6 +123,96 @@ async function cachedFetchBytes(
   }
   await cache.put(url, new Response(buf, { headers: { "content-type": "application/octet-stream" } }));
   return buf.buffer;
+}
+
+/**
+ * Replay the published parity vectors through the graph this device actually built.
+ *
+ * `sha256` already proves the bytes are the ones the pipeline measured. This proves something
+ * different and stronger: that the ONNX session built *here* — this browser, this backend, this
+ * WASM/WebGPU build — still reproduces the fp32 reference inside the tolerance the manifest
+ * publishes. A silently mis-compiling execution provider, a corrupted cache entry or an ORT
+ * regression all look identical to a working model until someone checks the numbers.
+ *
+ * A failure is never fatal to the page: the answer is forced to report-only, exactly like an
+ * uncalibrated export, and the Engine view says which number drifted — the app degrades instead of
+ * lying. `ok: null` (no vectors published, e.g. a schema-1 export) is information, not a failure.
+ */
+async function paritySelfTest(base: string, ort: any): Promise<SelfTest> {
+  if (!manifest.parityPath) {
+    return { ok: null, detail: "no parity vectors in this export (older manifest) — sha256 verification only" };
+  }
+  let payload: any;
+  try {
+    const bytes = await cachedFetchBytes(`${base}/${manifest.parityPath}`, { label: "parity.json" });
+    payload = JSON.parse(new TextDecoder().decode(bytes));
+  } catch (e) {
+    return { ok: null, detail: `parity vectors could not be fetched (${String(e)}) — sha256 verification only` };
+  }
+
+  // 1) tokenizer vectors: the pure-TS tokenizer must reproduce the Rust ids exactly. This is the
+  //    check that caught the Metaspace prepend_scheme divergence; a mismatch would silently
+  //    degrade every prediction, so it is fatal here too.
+  let tokenizerMismatches = 0;
+  const tkVectors: Array<{ text: string; ids: number[] }> = payload?.tokenizer?.vectors ?? [];
+  if (tok) {
+    for (const v of tkVectors) {
+      const got = tok!.encode(v.text);
+      if (got.length !== v.ids.length || got.some((x, i) => x !== v.ids[i])) tokenizerMismatches++;
+    }
+  }
+
+  // 2) logits vectors: run the downloaded graph and compare with the fp32 reference it ships.
+  const logitsVectors: Array<{ ids: number[]; markers: number[]; qtype: number; logits: number[] }> =
+    payload?.logits?.vectors ?? [];
+  const tolerance = Number(payload?.logits?.tolerance ?? 0);
+  if (!logitsVectors.length || !session) {
+    return {
+      ok: null,
+      detail: "parity file carries no logits vectors — sha256 verification only",
+      tokenizerMismatches,
+    };
+  }
+  let maxDelta = 0;
+  let top1 = 0;
+  for (const v of logitsVectors) {
+    const L = v.ids.length;
+    const K = v.markers.length;
+    const ids = new BigInt64Array(L);
+    const att = new BigInt64Array(L);
+    const mpos = new BigInt64Array(K);
+    const mmask = new Uint8Array(K);
+    v.ids.forEach((x, i) => { ids[i] = BigInt(x); att[i] = 1n; });
+    v.markers.forEach((p, k) => { mpos[k] = BigInt(p); mmask[k] = 1; });
+    const out = await session.run({
+      input_ids: new ort.Tensor("int64", ids, [1, L]),
+      attention_mask: new ort.Tensor("int64", att, [1, L]),
+      marker_pos: new ort.Tensor("int64", mpos, [1, K]),
+      marker_mask: new ort.Tensor("bool", mmask, [1, K]),
+      qtype: new ort.Tensor("int64", new BigInt64Array([BigInt(v.qtype)]), [1]),
+    });
+    const got = Array.prototype.slice.call(out.logits.data as Float32Array) as number[];
+    const n = Math.min(got.length, v.logits.length);
+    for (let i = 0; i < n; i++) maxDelta = Math.max(maxDelta, Math.abs(got[i] - v.logits[i]));
+    const argmax = (a: number[]) => { let b = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[b]) b = i; return b; };
+    if (argmax(got.slice(0, n)) === argmax(v.logits.slice(0, n))) top1++;
+  }
+  const top1Rate = top1 / logitsVectors.length;
+  const withinTolerance = maxDelta <= tolerance;
+  const ok = tokenizerMismatches === 0 && withinTolerance;
+  return {
+    ok,
+    detail: ok
+      ? `replayed ${logitsVectors.length} logits + ${tkVectors.length} tokenizer vectors on this device — max |Δlogit| ${maxDelta.toFixed(4)} ≤ ${tolerance}, top-1 ${(top1Rate * 100).toFixed(0)}%`
+      : tokenizerMismatches
+        ? `${tokenizerMismatches}/${tkVectors.length} tokenizer vectors do not reproduce the published ids — this device would mis-tokenize every message`
+        : `this backend drifts past the published tolerance (max |Δlogit| ${maxDelta.toFixed(4)} > ${tolerance}) — refusing to act on it`,
+    vectors: logitsVectors.length,
+    maxDelta,
+    tolerance,
+    top1: top1Rate,
+    tokenizerMismatches,
+  };
 }
 
 async function load(base: string, backend: string, threads: number) {
@@ -176,6 +285,15 @@ async function load(base: string, backend: string, threads: number) {
   });
   backendUsed = want === "webgpu" ? "webgpu" : ort.env.wasm.numThreads > 1 ? "wasm-mt" : "wasm-st";
 
+  // ---------------------------------------------------------------- self-test
+  post({ type: "status", status: "downloading", detail: "Replaying the published parity vectors against this device's graph…" });
+  selfTest = await paritySelfTest(base, ort).catch((e) => ({ ok: null, detail: `self-test could not run: ${String(e)}` }));
+  if (selfTest.ok === false) {
+    // Same posture as an uncalibrated export: report answers, never act on them.
+    manifest.abstain = { default: 1 };
+    manifest.calibrated = false;
+  }
+
   post({
     type: "manifest",
     manifest,
@@ -184,6 +302,7 @@ async function load(base: string, backend: string, threads: number) {
     banksVersion: BANKS_VERSION,
     tokenizer: { vocabSize: tok.vocabSize, kind: tok.kind, specials: data.ids, bytes: tjBytes.byteLength },
     graph: { path: spec.path, bytes: spec.bytes, sha256: spec.sha256 },
+    selfTest,
   });
   post({
     type: "status",
@@ -191,7 +310,8 @@ async function load(base: string, backend: string, threads: number) {
     backend: backendUsed,
     detail:
       `${manifest.modelVersion} · ${backendUsed}${manifest.calibrated ? "" : manifest.reportOnly ? " · report-only (did not clear the eval gates — inspect it, never act on it)" : " · uncalibrated (report-only)"}` +
-      (banksMismatch ? ` · bank drift (${banksMismatch})` : ""),
+      (banksMismatch ? ` · bank drift (${banksMismatch})` : "") +
+      (selfTest?.ok === true ? " · self-test passed" : selfTest?.ok === false ? ` · SELF-TEST FAILED (${selfTest.detail})` : ""),
   });
 }
 

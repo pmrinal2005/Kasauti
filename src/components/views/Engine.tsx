@@ -69,6 +69,18 @@ export function Engine() {
   // once an export is loaded, everything shown must describe THAT export, not the build-time default
   const man = model?.manifest ?? DEFAULT_MANIFEST;
   const evalRows = evalGateRows(man.evals);
+  // The parity self-test the Worker runs on this device: it is the one number that cannot be faked
+  // by the export itself, because it is measured here, on the visitor's own backend.
+  const st = model?.selfTest ?? null;
+  const selfTestText = st
+    ? st.ok === true
+      ? st.detail
+      : st.ok === false
+        ? `FAILED — ${st.detail}`
+        : st.detail
+    : model
+      ? "not reported by this export's worker build"
+      : "—";
   const [inspBusy, setInspBusy] = useState(false);
 
   useEffect(() => { setCap(detectCapability()); return subscribeModel(setModel); }, []);
@@ -179,6 +191,7 @@ export function Engine() {
             <dt>Temperature buckets</dt><dd>{Object.keys(man.temperatures).length || "none (T = 1)"}</dd>
             {Object.entries(man.abstain).map(([b, v]) => <Fragment key={b}><dt>Abstain below · {b}</dt><dd>{v}</dd></Fragment>)}
             <dt>Artefacts verified</dt><dd>{model ? `${model.graph?.path ?? "—"} · ${model.tokenizer?.bytes ? (model.tokenizer.bytes / 1048576).toFixed(1) + " MB tokenizer" : "tokenizer —"}` : "—"}</dd>
+            <dt>Self-test on this device</dt><dd>{selfTestText}</dd>
           </dl>
           <div className="note" style={{ marginTop: 12 }}>
             Design rules from Laya’s published limits: ≤20 options per choice (Banking77 collapse), option-order augmentation, <span className="mono">score</span> treated as weakest primitive, gate on <span className="mono">confidence</span> not <span className="mono">act_probability</span> (#185), and per-bucket temperature refit (ECE 0.314 → 0.106 on multilingual).
