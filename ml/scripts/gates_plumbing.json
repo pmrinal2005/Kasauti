@@ -1,0 +1,16 @@
+{
+  "_comment": "PLUMBING ONLY. Permissive gates for the mini real-architecture checkpoint (random weights), so the kaggle-profile path can be exercised end to end on CPU. NEVER pass this file to a real fine-tune: an export built with it would be gate-passing by construction. The pipeline forces reportOnly=true whenever a gates file sets plumbing=true.",
+  "plumbing": true,
+  "accuracy_overall": 0.0,
+  "accuracy_per_language_min": 0.0,
+  "ece_overall_max": 1.0,
+  "ece_per_bucket_max": 1.0,
+  "noul_accuracy_min": 0.0,
+  "choice_accuracy_min": 0.0,
+  "precision_pay_to_withdraw_min": 0.0,
+  "recall_pay_to_withdraw_min": 0.0,
+  "recall_impersonation_min": 0.0,
+  "false_positive_rate_negatives_max": 1.0,
+  "abstention_coverage_min": 0.0,
+  "quantized_agreement_min": 0.0
+}

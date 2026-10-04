@@ -200,9 +200,14 @@ def train(train_items: Sequence[Dict[str, Any]], model, tok: FastTokenizerAdapte
             batch = core.collate(chunk, pad_id)
             w = torch.tensor([item_weight(it, weights, args.negative_boost) for it in chunk])
             ctx = torch.autocast("cuda", dtype=torch.float16) if use_cuda else _nullcontext()
-            # accumulate without syncing; the last micro-batch of the accumulation window syncs
-            accumulating = accum % args.grad_accum != 0 and (b_idx + args.micro_batch) < len(my_items)
-            sync_ctx = model.no_sync() if (ddp is not None and accumulating) else _nullcontext()
+            # Accumulate without syncing; only the micro-batch that is followed by an optimizer step
+            # all-reduces. (The previous test `accum % grad_accum != 0` was evaluated *before* the
+            # increment, so it synced the FIRST micro-batch of each window and stepped after the
+            # last: with grad_accum > 1 every rank stepped on its own un-reduced gradients and the
+            # replicas silently diverged.)
+            last_mb = (b_idx + args.micro_batch) >= len(my_items)
+            will_step = (accum + 1) % args.grad_accum == 0 or last_mb
+            sync_ctx = model.no_sync() if (ddp is not None and not will_step) else _nullcontext()
             with ctx, sync_ctx:
                 logits, _act = model(
                     batch["input_ids"].to(device), batch["attention_mask"].to(device),
@@ -237,10 +242,16 @@ def train(train_items: Sequence[Dict[str, Any]], model, tok: FastTokenizerAdapte
             loss_ce = ((-(target * torch.log_softmax(logits.masked_fill(~mask, -1e4), -1)).sum(-1)) * w).mean()
             loss = (loss_rl + args.ce_weight * loss_ce) / args.grad_accum
 
-            if math.isfinite(float(loss.detach())):
+            # Under DDP every rank MUST call backward on every micro-batch: backward is where the
+            # gradient all-reduce happens, so one rank skipping a non-finite loss deadlocks the
+            # other. GradScaler then skips the step on every rank consistently (the inf/nan is
+            # all-reduced too). Single-process runs keep the cheap skip.
+            # (`no_sync` only has to wrap the forward: DDP decides at forward time whether the
+            # following backward all-reduces.)
+            if ddp is not None or math.isfinite(float(loss.detach())):
                 scaler.scale(loss).backward()
             accum += 1
-            if accum % args.grad_accum == 0 or (b_idx + args.micro_batch) >= len(my_items):
+            if will_step:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
@@ -256,6 +267,16 @@ def train(train_items: Sequence[Dict[str, Any]], model, tok: FastTokenizerAdapte
         history.append({"epoch": epoch + 1, "avg_loss": epoch_loss / max(1, n_batches),
                         "sigma": sigma, "seconds": round(time.time() - t0, 1)})
 
+    # every rank must hold the same weights before rank 0 calibrates/exports (collective: all ranks)
+    replicas_ok = None
+    if ddp is not None:
+        replicas_ok = _replicas_identical(model.module)
+        if not replicas_ok:
+            raise RuntimeError("DDP replicas diverged during training — refusing to export a model "
+                               "that only one rank actually holds")
+        if is_main:
+            print("  DDP: weights identical on all %d ranks after training" % world, flush=True)
+
     # post-training type-level temperature calibration on the held-out slice
     model.eval()
     temps = [1.0, 1.0, 1.0]
@@ -268,11 +289,29 @@ def train(train_items: Sequence[Dict[str, Any]], model, tok: FastTokenizerAdapte
     report = {"history": history, "seconds": round(time.time() - t0, 1),
               "n_items": len(my_items), "n_calib_holdout": len(calib_items),
               "temperatures_type_level": temps, "rare_class_weight_power": 0.35,
-              "negative_boost": args.negative_boost, "world_size": world, "ddp": ddp is not None}
+              "negative_boost": args.negative_boost, "world_size": world, "ddp": ddp is not None,
+              "replicas_identical": replicas_ok}
     model = model.module if ddp is not None else model
     if not is_main:
         return {**report, "rank_skipped_training_report": True}
     return report
+
+
+def _replicas_identical(module) -> bool:
+    """All-gather a cheap weight fingerprint and check every rank holds the same model."""
+    import torch
+    import torch.distributed as dist
+
+    with torch.no_grad():
+        fp = torch.zeros(2, dtype=torch.float64, device=next(module.parameters()).device)
+        for i, p in enumerate(module.parameters()):
+            v = p.detach().double()
+            fp[0] += v.sum()
+            fp[1] += (v * ((i % 7) + 1)).abs().sum()
+        gathered = [torch.zeros_like(fp) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered, fp)
+    ref = gathered[0]
+    return all(torch.allclose(g, ref, rtol=1e-9, atol=1e-6) for g in gathered[1:])
 
 
 def _nullcontext():

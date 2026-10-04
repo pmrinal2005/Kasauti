@@ -26,7 +26,7 @@ interface EvalGate {
   higher: boolean;
 }
 
-const EVAL_GATES: Array<Omit<EvalGate, "ok" | "valueText" | "gateText" | "value"> & { key: string }> = [
+const EVAL_GATES: Array<Omit<EvalGate, "ok" | "valueText" | "gateText" | "value"> & { key: string; preferKey?: string }> = [
   { key: "accuracy", label: "Held-out accuracy", gate: 0.8, higher: true, note: "overall, all question types" },
   { key: "accuracyPerLanguageMin", label: "Worst-language accuracy", gate: 0.7, higher: true, note: "English + Hindi at minimum" },
   { key: "ece", label: "Calibration error (ECE)", gate: 0.12, higher: false, note: "Laya ships over-confident; this is the fix" },
@@ -36,15 +36,18 @@ const EVAL_GATES: Array<Omit<EvalGate, "ok" | "valueText" | "gateText" | "value"
   { key: "impersonationRecall", label: "Impersonation recall", gate: 0.85, higher: true, note: "police / CBI / customs threats" },
   { key: "falsePositiveRate", label: "False-positive rate", gate: 0.1, higher: false, note: "measured on genuine advisories and education" },
   { key: "abstentionCoverage", label: "Abstention coverage", gate: 0.55, higher: true, note: "share of uncertain cases correctly held back" },
-  { key: "int8Agreement", label: "INT8 ↔ fp32 agreement", gate: 0.95, higher: true, note: "top-1 agreement across option permutations" },
-  { key: "q4Agreement", label: "4-bit ↔ fp32 agreement", gate: 0.8, higher: true, note: "WebGPU path; 0.95 expected with --block-size 64" },
+  // `preferKey`: the pipeline gates on top-1 agreement over *decisive* items (reference margin ≥ 0.02);
+  // raw top-1 over near-ties measures noise. Older manifests only carry the raw number.
+  { key: "int8Agreement", preferKey: "int8DecisiveAgreement", label: "INT8 ↔ fp32 agreement", gate: 0.95, higher: true, note: "top-1 agreement on decisive items (the export gate)" },
+  { key: "q4Agreement", preferKey: "q4DecisiveAgreement", label: "4-bit ↔ fp32 agreement", gate: 0.8, higher: true, note: "WebGPU path; 0.95 expected with --block-size 64" },
 ];
 
 function evalGateRows(evals: Record<string, number | null> | undefined): EvalGate[] {
   if (!evals) return [];
   const rows: EvalGate[] = [];
   for (const g of EVAL_GATES) {
-    const raw = evals[g.key];
+    const preferred = g.preferKey ? evals[g.preferKey] : undefined;
+    const raw = preferred !== undefined && preferred !== null ? preferred : evals[g.key];
     if (raw === undefined || raw === null) continue;
     const v = Number(raw);
     rows.push({

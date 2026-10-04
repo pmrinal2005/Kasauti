@@ -445,10 +445,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         decoded = decode_predictions(eval_rows, logits_by_key, calibration["temperature"],
                                      calibration["temperature_by_options"], abstain)
         metrics = evals.evaluate_predictions(eval_rows, decoded)
-        gates_override = {}
-        if args.gates:
-            with open(args.gates) as f:
-                gates_override = json.load(f)
+        gates_override = _load_gates(args.gates)
         gate_report = evals.run_gates(metrics, gates_override,
                                       extra={"coverage": coverage.get("coverage", 0.0)})
         log(f"eval accuracy={metrics['accuracy']} ece={metrics['ece']} "
@@ -556,21 +553,29 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     except Exception as e:  # pragma: no cover - depends on the installed ORT build
         agree_q4 = {"n": 0, "top1_agreement": None, "error": str(e)[:200]}
     log(f"quantization agreement: int8={agree_int8['top1_agreement']} "
-        f"(Δlogit {agree_int8['mean_abs_logit_delta']})  q4={agree_q4.get('top1_agreement')}")
+        f"(decisive {agree_int8.get('decisive_top1_agreement')} on {agree_int8.get('n_decisive')}/"
+        f"{agree_int8['n']}, Δlogit {agree_int8['mean_abs_logit_delta']})  "
+        f"q4={agree_q4.get('top1_agreement')} (decisive {agree_q4.get('decisive_top1_agreement')})")
 
     parity_int8 = evals.DEFAULT_GATES["quantized_agreement_min"]
     if args.gates:  # the same override file the eval gates read (previously ignored here)
-        with open(args.gates) as f:
-            parity_int8 = float(json.load(f).get("quantized_agreement_min", parity_int8))
-    if (agree_int8["top1_agreement"] or 0) < parity_int8 and profile != "smoke":
-        log("GATE FAILED: INT8 build disagrees with fp32 too often — refusing to publish")
+        parity_int8 = float(_load_gates(args.gates).get("quantized_agreement_min", parity_int8))
+    # Gate on the DECISIVE agreement: raw top-1 over near-tied items measures noise, not
+    # quantization quality (a random mini checkpoint scores ~0.3-0.5 raw with |Δlogit| ≈ 0.002).
+    # If nothing in the sample is decisive (an untrained model), fall back to the raw number.
+    int8_gate_value = agree_int8.get("decisive_top1_agreement")
+    if int8_gate_value is None or (agree_int8.get("n_decisive") or 0) < 8:
+        int8_gate_value = agree_int8["top1_agreement"]
+    if (int8_gate_value or 0) < parity_int8 and profile != "smoke":
+        log(f"GATE FAILED: INT8 build disagrees with fp32 on decisive items ({int8_gate_value} < "
+            f"{parity_int8}) — refusing to publish")
         raise SystemExit(3)
 
     # ---------------------------------------------------------------- parity vectors
     tvec = parity.tokenizer_vectors(os.path.join(exp_dir, "tokenizer.json"))
     # the browser loads the INT8 graph on WASM and the Q4 graph on WebGPU: vectors come from fp32,
     # and the tolerance absorbs the quantization delta measured above
-    tol = 0.35 if (agree_int8["top1_agreement"] or 1) < 0.995 else 0.08
+    tol = 0.35 if (int8_gate_value or 1) < 0.995 else 0.08
     # The fixed 0.35 / 0.08 were tuned on the 0.5 M-parameter smoke model. A 4-bit mmBERT-base drifts
     # further than that on some sequences, and the Worker would then demote a perfectly good export
     # on every device. Widen to the *measured* worst case (+25 %), never past a hard cap: a graph
@@ -614,6 +619,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                "ece": (metrics.get("ece") if not args.export_only else None),
                "int8Agreement": agree_int8["top1_agreement"],
                "q4Agreement": agree_q4.get("top1_agreement"),
+               "int8DecisiveAgreement": agree_int8.get("decisive_top1_agreement"),
+               "q4DecisiveAgreement": agree_q4.get("decisive_top1_agreement"),
                "dataset": f"kasauti-synthetic-{os.environ.get('KASAUTI_DATA_VERSION', '1.0.0')}"},
         extras={"profile": profile, "createdUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 # Which checkpoint bytes this model was fine-tuned from, and whether that base was
@@ -623,7 +630,11 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 # Honesty switch. The browser turns `reportOnly` into "abstain on everything", so an
                 # export that did not clear the eval gates (or a smoke/dev export, whose gates are
                 # advisory) can never move the verdict — it can only be inspected.
-                "reportOnly": bool(profile == "smoke" or not gates_passed),
+                # A `plumbing: true` gates file (ml/scripts/gates_plumbing.json) relaxes every
+                # threshold so the real-architecture path can be exercised on a random mini
+                # checkpoint; such an export is report-only no matter what its gates said.
+                "reportOnly": bool(profile == "smoke" or not gates_passed
+                                   or _load_gates(args.gates).get("plumbing")),
                 # Drift guard: the browser compares this against `BANKS_SHA256` in src/lib/banks.ts.
                 # A mismatch means the model was trained on different question wording than the
                 # runtime asks — the one failure mode that is both silent and expensive.
@@ -705,6 +716,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     calib.write_json(summary, os.path.join(args.out, "summary.json"))
     log(f"done in {summary['seconds']}s → {os.path.join(args.out, 'summary.json')}")
     return summary
+
+
+def _load_gates(path: Optional[str]) -> Dict[str, Any]:
+    """Gate overrides from a JSON file; keys starting with `_` are comments."""
+    if not path:
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
 def _rust_tok(path: str):

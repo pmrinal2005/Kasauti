@@ -394,25 +394,43 @@ def ort_predict(sess, items: Sequence[Dict[str, Any]]) -> List[Tuple[int, List[f
 
 
 def agreement(a: Sequence[Tuple[int, Sequence[float], Sequence[float]]],
-              b: Sequence[Tuple[int, Sequence[float], Sequence[float]]]) -> Dict[str, Any]:
-    """Top-1 agreement + mean absolute logit delta between two prediction sets."""
+              b: Sequence[Tuple[int, Sequence[float], Sequence[float]]],
+              decisive_margin: float = 0.02) -> Dict[str, Any]:
+    """Top-1 agreement + mean absolute logit delta between two prediction sets.
+
+    ``top1_agreement`` counts every item, so it is dominated by near-ties: on an item whose two
+    best options are 0.501 / 0.499 under the reference graph, any quantization noise at all flips
+    the argmax without changing a single decision the runtime would act on (the abstention cut
+    sits far above a coin-flip). ``decisive_top1_agreement`` is the same number restricted to items
+    where the reference top-1 leads by at least ``decisive_margin`` in probability, which is what
+    the export gate reads; both are reported.
+    """
     import numpy as np
 
     n = min(len(a), len(b))
     if n == 0:
-        return {"n": 0, "top1_agreement": None, "mean_abs_logit_delta": None, "mean_kl": None}
+        return {"n": 0, "top1_agreement": None, "decisive_top1_agreement": None, "n_decisive": 0,
+                "mean_abs_logit_delta": None, "mean_kl": None}
     same = 0
+    dec_n, dec_same = 0, 0
     deltas, kls = [], []
     for i in range(n):
         za, zb = np.asarray(a[i][1]), np.asarray(b[i][1])
         m = min(len(za), len(zb))
         za, zb = za[:m], zb[:m]
-        same += int(int(np.argmax(za)) == int(np.argmax(zb)))
+        agree = int(int(np.argmax(za)) == int(np.argmax(zb)))
+        same += agree
         deltas.append(float(np.mean(np.abs(za - zb))))
         pa = core.softmax_rows(za, 1.0)[0]
         pb = core.softmax_rows(zb, 1.0)[0]
         kls.append(float(np.sum(pa * np.log(np.clip(pa, 1e-9, None) / np.clip(pb, 1e-9, None)))))
+        srt = np.sort(pa)[::-1]
+        if len(srt) < 2 or float(srt[0] - srt[1]) >= decisive_margin:
+            dec_n += 1
+            dec_same += agree
     return {"n": n, "top1_agreement": round(same / n, 4),
+            "decisive_top1_agreement": (round(dec_same / dec_n, 4) if dec_n else None),
+            "n_decisive": dec_n, "decisive_margin": decisive_margin,
             "mean_abs_logit_delta": round(float(np.mean(deltas)), 4),
             "mean_kl": round(float(np.mean(kls)), 4)}
 
