@@ -500,7 +500,12 @@ def check_reference_client(staging: str, banks_path: str, checkpoint_dir: Option
 
                 # the reference names its own top-1; ours must agree
                 top_ours = keys[int(np.argmax(p_ours))]
-                if q["type"] in ("choice", "noul") and ref_top != top_ours:
+                # A near-tie is not a disagreement: the reference rounds to 4 dp, so p = 0.50003 is
+                # published as 0.5 and its argmax falls to index 0 ("false") while ours says "true".
+                # Real disagreement is still caught by the probability-delta check just below.
+                srt = np.sort(p_ours)[::-1]
+                near_tie = len(srt) > 1 and float(srt[0] - srt[1]) <= 2e-3
+                if q["type"] in ("choice", "noul") and ref_top != top_ours and not near_tie:
                     failures.append(f"{row['id']}/{qid}: reference chose {ref_top!r}, our decode {top_ours!r}")
 
                 # both paths softmax the same graph with the same fitted temperature: a difference

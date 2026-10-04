@@ -329,6 +329,16 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 base["revisionResolved"] = snapshot_revision(ckpt_dir)
             except Exception:
                 pass
+            if args.resume_from:
+                # carry the pinned-base provenance through a resume, so a re-export's manifest still
+                # names the Hub commit the weights originally came from
+                try:
+                    with open(os.path.join(ckpt_dir, "rl_agent_config.json")) as f:
+                        prev = (json.load(f).get("training") or {}).get("base")
+                    if isinstance(prev, dict) and prev.get("modelId"):
+                        base = {**prev, "kind": "resumed-finetune", "path": ckpt_dir}
+                except Exception as e:
+                    log(f"resume: no base provenance in rl_agent_config.json ({type(e).__name__})")
             if not args.resume_from:  # a resume dir is a previous *Kasauti* export, not the base
                 try:
                     from laya.agent import _fix_tokenizer_config
@@ -375,9 +385,32 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         if not items:
             raise SystemExit("no training items — check the banks/splits")
         args.device = device
-        report = trainer.train(items, model, tok, cfg, args.out, args)
-        log(f"trained in {report['seconds']}s | loss curve {[round(h['avg_loss'],3) for h in report['history']]}")
+        if args.skip_train:
+            log("--skip-train: using the loaded weights as-is (no RLCD updates)")
+            report = {"skipped": True, "seconds": 0.0, "history": []}
+        else:
+            report = trainer.train(items, model, tok, cfg, args.out, args)
+            log(f"trained in {report['seconds']}s | loss curve "
+                f"{[round(h['avg_loss'], 3) for h in report['history']]}")
+        if args.world_size > 1 and args.rank != 0:
+            # Evaluation, export and publish are rank-0 work. Leaving *here* (not after the export,
+            # as before) stops rank 1 from writing the same ~1.3 GB fp32 graph and quantized files
+            # into the same directory while rank 0 is reading them.
+            log("rank %d: training complete — eval/export/publish are rank-0 work; exiting" % args.rank)
+            return {"profile": profile, "rank": args.rank, "worldSize": args.world_size,
+                    "skipped": "evaluation + export + publish (rank-0 work)"}
         calib.write_json(report, os.path.join(args.out, "train_report.json"))
+        if profile != "smoke" and not args.skip_train:
+            # A loadable Laya checkpoint of the fine-tune, BEFORE vocab pruning. It is what
+            # `--resume-from` / `--skip-train` re-export from (no second GPU run when only the export
+            # step needs a retry), and `laya.load(<dir>)` can run it directly for spot checks.
+            ft_dir = os.path.join(args.out, "finetuned")
+            unwrapped = model.module if hasattr(model, "module") else model
+            trainer.save_checkpoint(unwrapped, tok, cfg, ft_dir, extra={
+                "temperature": report.get("temperatures_type_level", [1.0, 1.0, 1.0]),
+                "training": {"kasauti": True, "epochs": args.epochs,
+                             "world_size": args.world_size, "base": base}})
+            log(f"fine-tuned checkpoint saved → {ft_dir}")
 
     # ---------------------------------------------------------------- calibrate + gate
     eval_splits = ("val", "test")
@@ -443,6 +476,17 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     corpus += [t["instructions"] for task in tasks.values() for t in [task["triage"]]]
     for task in tasks.values():
         corpus += [q["instructions"] for group in task["followups"].values() for q in group.values()]
+    # The question HEAD is tokenized separately from the state — "<type> question: <ins>" and each
+    # " <rendered option>" — and its tokens ("▁choice", "▁question", "level", option keys, …) appear in
+    # every sequence the model sees. Leaving them out of the prune corpus dropped them from the
+    # pruned vocab, so the browser re-spelled them with byte-fallback tokens the model was never
+    # trained on. Add the exact strings `build_head` encodes, for every bank question.
+    for row in rows:
+        for q in row["questions"].values():
+            qi = core.to_internal(q)
+            corpus.append("%s question: %s" % (qi["t"], qi["ins"]))
+            corpus += [" " + o for o in core.render_options(qi)]
+    corpus = list(dict.fromkeys(corpus))  # order-preserving de-dup (the drift check runs per text)
     prune_stats = export.prune_tokenizer(os.path.join(args.out, "tokenizer_full.json") if profile == "smoke"
                                         else os.path.join(ckpt_dir, "tokenizer", "tokenizer.json"),
                                         corpus, exp_dir)
@@ -466,16 +510,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         log("tokenizer drift gate overridden by --allow-tokenizer-drift (recorded in the manifest)")
     tok_pruned = FastTokenizerAdapter(_rust_tok(os.path.join(exp_dir, "tokenizer.json")))
 
-    # 2. gather embedding rows into the pruned order, then export fp32
+    # 2. resize the embedding table to the pruned vocabulary, then export fp32
+    with open(os.path.join(exp_dir, "vocab_remap.json")) as f:
+        remap = json.load(f)["remap"]
     if not args.export_only:
-        remap = json.load(open(os.path.join(exp_dir, "vocab_remap.json")))["remap"]
-        with torch.no_grad():
-            sd = model.state_dict()
-            pruned_sd = export.gather_embeddings(sd, remap)
-            model.load_state_dict(pruned_sd, strict=True)
-            if hasattr(model, "encoder") and hasattr(model.encoder, "config"):
-                setattr(model.encoder.config, "vocab_size", prune_stats["vocab_after"])
-        log(f"embeddings gathered to {prune_stats['vocab_after']} rows")
+        # Export runs on CPU in fp32: the dummies `export_fp32` traces with are CPU tensors, and a
+        # model left on CUDA after training fails the trace with a device mismatch.
+        model = model.to("cpu").float().eval()
+        resized = export.resize_vocab(model, remap)
+        log(f"embeddings resized to {prune_stats['vocab_after']} rows ({', '.join(resized)})")
         torch.save({"state_dict": {k: v for k, v in model.state_dict().items()},
                     "cfg": cfg}, os.path.join(exp_dir, "model_pruned.pt"))
         fp32_path = os.path.join(exp_dir, "kasauti-laya-fp32.onnx")
@@ -496,20 +539,29 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     ort_fp32 = export.ort_session(fp32_path)
     ort_int8 = export.ort_session(int8_path)
     ort_q4 = export.ort_session(q4_path)
-    sample = [{k: v for k, v in it.items() if k in ("ids", "markers", "qtype", "target")}
+    # eval_items were tokenized with the FULL tokenizer; the exported graph (and the browser) index
+    # the PRUNED table, so the sample has to be in pruned ids or every agreement/parity number is
+    # measured on the wrong embedding rows.
+    sample = [{"ids": export.remap_ids(it["ids"], remap), "markers": it["markers"],
+               "qtype": it["qtype"], "target": it["target"]}
               for it in eval_items[: min(48, len(eval_items))]]
     p_fp32 = export.ort_predict(ort_fp32, sample)
-    agree_int8 = export.agreement(p_fp32, export.ort_predict(ort_int8, sample))
+    p_int8 = export.ort_predict(ort_int8, sample)
+    agree_int8 = export.agreement(p_fp32, p_int8)
     # MatMulNBits is a WebGPU-EP graph: the CPU EP can still run it, but if the kernel is missing
     # the agreement is meaningless — detect that and report it instead of pretending.
     try:
-        agree_q4 = export.agreement(p_fp32, export.ort_predict(ort_q4, sample))
+        p_q4 = export.ort_predict(ort_q4, sample)
+        agree_q4 = export.agreement(p_fp32, p_q4)
     except Exception as e:  # pragma: no cover - depends on the installed ORT build
         agree_q4 = {"n": 0, "top1_agreement": None, "error": str(e)[:200]}
     log(f"quantization agreement: int8={agree_int8['top1_agreement']} "
         f"(Δlogit {agree_int8['mean_abs_logit_delta']})  q4={agree_q4.get('top1_agreement')}")
 
     parity_int8 = evals.DEFAULT_GATES["quantized_agreement_min"]
+    if args.gates:  # the same override file the eval gates read (previously ignored here)
+        with open(args.gates) as f:
+            parity_int8 = float(json.load(f).get("quantized_agreement_min", parity_int8))
     if (agree_int8["top1_agreement"] or 0) < parity_int8 and profile != "smoke":
         log("GATE FAILED: INT8 build disagrees with fp32 too often — refusing to publish")
         raise SystemExit(3)
@@ -519,19 +571,26 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     # the browser loads the INT8 graph on WASM and the Q4 graph on WebGPU: vectors come from fp32,
     # and the tolerance absorbs the quantization delta measured above
     tol = 0.35 if (agree_int8["top1_agreement"] or 1) < 0.995 else 0.08
+    # The fixed 0.35 / 0.08 were tuned on the 0.5 M-parameter smoke model. A 4-bit mmBERT-base drifts
+    # further than that on some sequences, and the Worker would then demote a perfectly good export
+    # on every device. Widen to the *measured* worst case (+25 %), never past a hard cap: a graph
+    # that drifts more than the cap is a broken quantization, not a tolerance problem.
+    measured = 0.0
+    for other in (p_int8, locals().get("p_q4") or []):
+        for (_qa, za, _ta), (_qb, zb, _tb) in zip(p_fp32, other):
+            measured = max(measured, max((abs(a - b) for a, b in zip(za, zb)), default=0.0))
+    tol_cap = float(os.environ.get("KASAUTI_PARITY_TOL_CAP", "1.5"))
+    if measured > tol:
+        if measured > tol_cap and profile != "smoke":
+            log(f"GATE FAILED: quantized logits drift up to {measured:.3f} > cap {tol_cap} — "
+                f"re-export with --block-size 64 (or --no-quantize-embedding)")
+            raise SystemExit(3)
+        tol = round(min(tol_cap, measured * 1.25), 3)
+    log(f"parity tolerance {tol} (measured worst |Δlogit| {measured:.4f} over int8 + q4)")
     lvec = parity.logits_vectors(ort_fp32, sample, tolerance=tol)
     parity_path = os.path.join(exp_dir, "parity.json")
     parity.write_parity(parity_path, tvec, lvec)
     log(f"parity vectors: {len(tvec['vectors'])} tokenizer / {len(lvec['vectors'])} logits")
-
-    if args.world_size > 1 and args.rank != 0:
-        # Only rank 0 writes artifacts (all ranks writing identical files would race). Every DDP
-        # collective happens inside the training loop and the ranks trim to the same micro-batch
-        # count, so no rank can still be inside a collective here — the others just leave, and a
-        # barrier would only add a way to hang when rank 0 later fails a gate.
-        log("rank %d: training complete — evaluation, export and publish are rank-0 work; exiting" % args.rank)
-        return {"profile": profile, "rank": args.rank, "worldSize": args.world_size,
-                "skipped": "evaluation + export + publish (rank-0 work)"}
 
     # ---------------------------------------------------------------- manifest + staging
     # `gates_passed` is only defined when the eval ran; an --export-only run re-packages an existing
@@ -696,6 +755,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         # gloo on CPU so the whole DDP path is testable without a GPU; nccl on Kaggle
         backend = "nccl" if torch.cuda.is_available() else "gloo"
+        local_rank = int(os.environ.get("LOCAL_RANK", "0") or 0)
+        if backend == "nccl":
+            # Without this every rank resolves "cuda" to cuda:0: both processes load the model onto
+            # the same T4 (OOM at mmBERT-base x 2) and DDP receives device_ids=[None]. The reference
+            # train_ddp.py does exactly this before init_process_group.
+            torch.cuda.set_device(local_rank)
+            args.device = f"cuda:{local_rank}"
         dist.init_process_group(backend)
         args.rank = dist.get_rank()
         args.world_size = dist.get_world_size()

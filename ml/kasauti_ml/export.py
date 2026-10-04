@@ -188,20 +188,84 @@ def prune_tokenizer(tok_json_path: str, corpus: Iterable[str], out_dir: str,
     return stats
 
 
+def _kept_old_ids(remap: Sequence[int]) -> List[int]:
+    """Old ids in *new-id order* (``remap[old] = new``; -1 = dropped)."""
+    kept = sorted(((new, old) for old, new in enumerate(remap) if new >= 0))
+    if [n for n, _ in kept] != list(range(len(kept))):
+        raise ValueError("vocab remap is not a dense 0..n-1 renumbering")
+    return [old for _, old in kept]
+
+
 def gather_embeddings(state_dict: Dict[str, Any], remap: Sequence[int]) -> Dict[str, Any]:
-    """Rewrite every ``vocab_size``-row parameter to the pruned order (lossless row copy)."""
+    """Rewrite every ``vocab_size``-row parameter to the pruned order (lossless row copy).
+
+    Kept for callers that operate on a bare state dict. Matching is by **shape** (rows ==
+    ``len(remap)``) rather than by parameter name: the old name heuristic missed the smoke model's
+    ``encoder.emb.weight`` entirely, which silently shipped an un-pruned table that the pruned
+    tokenizer's ids no longer indexed correctly. Use :func:`resize_vocab` on a live model.
+    """
     import torch
 
+    idx = torch.tensor(_kept_old_ids(remap), dtype=torch.long)
     out: Dict[str, Any] = {}
     for name, tensor in state_dict.items():
-        t = tensor
-        if t.dim() >= 2 and t.shape[0] == len(remap) and any(
-            key in name for key in ("embed_tokens", "wte", "word_embeddings", "embeddings")
-        ):
-            idx = torch.tensor([i for i in remap if i >= 0], dtype=torch.long)
-            out[name] = t.index_select(0, idx).contiguous()
+        if tensor.dim() >= 2 and tensor.shape[0] == len(remap):
+            out[name] = tensor.index_select(0, idx.to(tensor.device)).contiguous()
         else:
-            out[name] = t
+            out[name] = tensor
+    return out
+
+
+def resize_vocab(model, remap: Sequence[int]) -> List[str]:
+    """Shrink every token-embedding table of a live model to the pruned vocabulary, in place.
+
+    ``load_state_dict(strict=True)`` refuses a state dict whose embedding has fewer rows than the
+    module, so a gathered state dict cannot simply be loaded back (that is the crash the real
+    multilingual run hit at 256 000 → ~5 000 rows). Instead each ``nn.Embedding`` with
+    ``num_embeddings == len(remap)`` gets a new, smaller ``weight`` Parameter holding the kept rows
+    in new-id order, and any output projection tied to it is re-pointed. Returns the module names
+    that were resized; raises if none was, because a pruned tokenizer feeding an un-pruned table is
+    exactly the silent misalignment this guards against.
+    """
+    import torch
+
+    n_old = len(remap)
+    idx = _kept_old_ids(remap)
+    resized: List[str] = []
+    with torch.no_grad():
+        for name, mod in model.named_modules():
+            if isinstance(mod, torch.nn.Embedding) and mod.num_embeddings == n_old:
+                old_w = mod.weight
+                new_w = torch.nn.Parameter(
+                    old_w.index_select(0, torch.tensor(idx, dtype=torch.long, device=old_w.device))
+                    .clone().contiguous(), requires_grad=old_w.requires_grad)
+                mod.weight = new_w
+                mod.num_embeddings = len(idx)
+                if mod.padding_idx is not None:
+                    mod.padding_idx = remap[mod.padding_idx] if remap[mod.padding_idx] >= 0 else None
+                resized.append(name)
+                # tied output heads (MaskedLM-style) share the Parameter object
+                for _n2, mod2 in model.named_modules():
+                    if isinstance(mod2, torch.nn.Linear) and mod2.weight is old_w:
+                        mod2.weight = new_w
+                        mod2.out_features = len(idx)
+    if not resized:
+        raise RuntimeError(f"resize_vocab: no nn.Embedding with {n_old} rows found — the pruned "
+                           f"tokenizer would index an un-pruned table")
+    cfg = getattr(getattr(model, "encoder", None), "config", None)
+    if cfg is not None and hasattr(cfg, "vocab_size"):
+        setattr(cfg, "vocab_size", len(idx))
+    return resized
+
+
+def remap_ids(ids: Sequence[int], remap: Sequence[int]) -> List[int]:
+    """Full-tokenizer ids → pruned ids. Raises on a dropped id (it would index a missing row)."""
+    out = []
+    for i in ids:
+        j = remap[i] if 0 <= i < len(remap) else -1
+        if j < 0:
+            raise ValueError(f"token id {i} was pruned but is used by an export sample")
+        out.append(j)
     return out
 
 

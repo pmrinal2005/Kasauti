@@ -10,11 +10,11 @@
 
 # --- the reference Laya implementation (build_sequence / agent / teacher helpers) -------------
 #     `laya[onnx]` is only needed if you want to compare against the reference ONNXAgent.
-laya>=0.3.20
+laya[onnx]>=0.3.26
 
 # --- model + tokenizer --------------------------------------------------------------------
 transformers>=4.48
-tokenizers>=0.21,<0.23
+tokenizers>=0.21
 safetensors>=0.4
 huggingface_hub>=0.26
 
